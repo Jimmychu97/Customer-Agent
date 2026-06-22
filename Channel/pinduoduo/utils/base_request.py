@@ -2,12 +2,30 @@ import requests
 import json
 import time
 import random
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from typing import Dict, Any, Optional, Union, Callable
 from utils.logger_loguru import get_logger
 from database import db_manager
 
 # 延迟导入，避免循环导入
 import importlib
+
+
+def _make_session() -> requests.Session:
+    """创建带自动重试的独立 Session"""
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["GET", "POST"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=2, pool_maxsize=10)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
 
 
 class BaseRequest:
@@ -62,6 +80,9 @@ class BaseRequest:
             'priority': 'u=1, i'
         }
         
+        # 每个实例独立的 Session，隔离连接池，避免多账号并发时互相干扰
+        self._session = _make_session()
+
         # 初始化账户信息和cookies
         self.cookies = {}
         self.account_name = "未知账号"
@@ -472,8 +493,8 @@ class BaseRequest:
         self._log_request("GET", url, params=params)
         
         def _make_request():
-            return requests.get(
-                url, 
+            return self._session.get(
+                url,
                 params=params,
                 headers=merged_headers,
                 cookies=self.cookies,
@@ -505,7 +526,7 @@ class BaseRequest:
         self._log_request("POST", url, data=data, json=json_data)
         
         def _make_request():
-            return requests.post(
+            return self._session.post(
                 url,
                 data=data,
                 json=json_data,

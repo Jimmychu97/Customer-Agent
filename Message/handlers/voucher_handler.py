@@ -28,9 +28,17 @@ def _extract_imei(text: str) -> Optional[str]:
 
 
 def _extract_serial(text: str) -> Optional[str]:
-    """提取苹果序列号（8-12位字母数字混合，必须含字母，排除纯数字）"""
+    """提取苹果序列号
+    苹果序列号规则：
+    - 8-12位字母数字混合
+    - 只含大写字母 A-Z 和数字 0-9
+    - 不含 O（字母）、I、S（易与 0、5 混淡）
+    - 必须含有字母（排除纯数字）
+    """
+    # 苹果序列号不包含 O、I、S
+    APPLE_CHARS = r'[A-HJ-NP-RT-Z0-9]'
     upper = text.upper()
-    for m in re.finditer(r'(?<![A-Z0-9])([A-Z0-9]{8,12})(?![A-Z0-9])', upper):
+    for m in re.finditer(rf'(?<![A-Z0-9])({APPLE_CHARS}{{8,12}})(?![A-Z0-9])', upper):
         val = m.group(1)
         letters = len(re.findall(r'[A-Z]', val))
         if letters >= 2:
@@ -195,21 +203,25 @@ class VoucherDetectionHandler(BaseHandler):
             from database.models import Order
 
             with db_manager.session_scope() as session:
-                orders = (
-                    session.query(Order)
-                    .filter_by(shop_id=shop_id, session_id=from_uid, status=0)
-                    .order_by(Order.created_at.desc())
-                    .all()
-                )
-
+                # 不再以 from_uid 匹配最新单，改为以卡券号或序列号定位具体的一单
+                # 优先级：卡券号 > 序列号（卡券号唯一性更强）
                 order = None
-                for o in orders:
-                    if sn and not o.sn_imei and o.coupons:
-                        order = o; break
-                    if coupon_no and not o.coupons and o.sn_imei:
-                        order = o; break
-                if order is None and orders:
-                    order = orders[0]
+
+                if coupon_no:
+                    # 卡券号唯一，用卡券号精确匹配已有单
+                    # 如果同一张卡券已建单（等序列号），则补全序列号
+                    # 如果这张卡券还没建单，新建，提示用户发序列号
+                    order = session.query(Order).filter_by(
+                        shop_id=shop_id,
+                        session_id=from_uid,
+                        coupons=coupon_no,
+                        status=0,
+                    ).first()
+
+                else:
+                    # 序列号/IMEI：直接新建单
+                    # 同一序列号可能对应多个不同服务的卡券，不能自动匹配旧单
+                    order = None
 
                 if order is None:
                     self.logger.info(
@@ -357,7 +369,6 @@ class VoucherDetectionHandler(BaseHandler):
             from database.models import GoodsCommit, Order
             from Channel.pinduoduo.utils.API.gsx_api import query_gsx
 
-            # 通过 goods_id + spec_name 匹配 GoodsCommit 得到 server_id，即 GSX 的 key
             with db_manager.session_scope() as session:
                 gc = session.query(GoodsCommit).filter_by(
                     goods_id=goods_id,
@@ -380,28 +391,23 @@ class VoucherDetectionHandler(BaseHandler):
             gsx_data = result["data"]
             self.logger.info(f"[核销] GSX查询完成 sn={serial} key={gsx_key}")
 
-            # 保存查询结果
             with db_manager.session_scope() as session:
                 order = session.query(Order).filter_by(id=order_id).first()
                 if order:
                     order.sku_id = gsx_key
                     order.gsx_result = json.dumps(gsx_data, ensure_ascii=False)
 
-            # 格式化 GSX 结果为可读文本
             gsx_text = _format_gsx_result(gsx_data)
             fixed = "亲，五行好平+关注+收藏+截图+文字好平赏个。以后有关于这部机器的验机问题，都可以随时联系美高技术员，技术员将为您解答！非常感谢您选择我们,祝你购机愉快~"
 
-            # 生成 AI 简析
-            analysis = _analyze_gsx_result(gsx_data)
-            report_msg = gsx_text
-            if analysis:
-                report_msg = f"{gsx_text}\n\n📊 验机报告简析：\n{analysis}"
+            await self._send(shop_id, user_id, from_uid, gsx_text)
 
-            # 先发报告+简析，再单独发结语
-            await self._send(shop_id, user_id, from_uid, report_msg)
+            analysis = await self._llm_analyze_gsx(gsx_text)
+            if analysis:
+                await self._send(shop_id, user_id, from_uid, analysis)
+
             await self._send(shop_id, user_id, from_uid, fixed)
 
-            # 将 GSX 报告写入 AI 会话历史，客户费用后续问问题时 AI 有数据可分析
             try:
                 from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
                 from core.di_container import container
@@ -418,6 +424,36 @@ class VoucherDetectionHandler(BaseHandler):
 
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] GSX查询失败: {e}")
+
+    async def _llm_analyze_gsx(self, gsx_text: str) -> str:
+        """调用 LLM 对 GSX 报告进行详细中文分析"""
+        try:
+            from config import config
+            from openai import AsyncOpenAI
+
+            api_key = config.get("llm.api_key", "")
+            api_base = config.get("llm.api_base", "")
+            model_name = config.get("llm.model_name", "")
+            if not api_key or not model_name:
+                return ""
+
+            client = AsyncOpenAI(api_key=api_key, base_url=api_base or None, timeout=30)
+            prompt = (
+                "你是一名专业的苹果手机验机顾问，请根据以下 GSX 验机报告，"
+                "用简单易懂的中文向买家详细解释每一项内容的含义，"
+                "重点说明该机器的整体状况、是否有风险、值不值得购买，"
+                "最后告知用户如有疑问可以继续询问。\n\n"
+                f"验机报告：\n{gsx_text}"
+            )
+            resp = await client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+            )
+            return resp.choices[0].message.content.strip()
+        except Exception as e:
+            self.logger.warning(f"LLM 分析 GSX 报告失败: {e}")
+            return ""
 
     def _update_order_status(self, order_id: int, status: int) -> None:
         """更新 Order 状态"""
