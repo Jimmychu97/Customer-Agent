@@ -44,6 +44,15 @@ class AIReplyHandler(BaseHandler):
     async def handle(self, context: Context, metadata: Dict[str, Any]) -> bool:
         """处理AI回复"""
         try:
+            # 图片/视频消息直接回固定文字，不走 AI
+            if context.type == ContextType.IMAGE:
+                reply = "亲，收到图片啦！😊 不过我无法识别图片内容哦～\n\n请直接把以下信息复制发给我，方便帮您处理：\n📱 手机序列号（设置→通用→关于本机→序列号）\n📱 或 IMEI码（拨号输入 *#06# 即可显示）\n🎫 商品卡券（待收货→点击商品→查看卡券→复制卡券）\n\n谢谢您的配合！✨"
+                return await self._send_reply(context, reply, metadata)
+
+            if context.type == ContextType.VIDEO:
+                reply = "亲，收到视频啦！😊 不过我无法识别视频内容哦～有什么问题直接文字告诉我吧！"
+                return await self._send_reply(context, reply, metadata)
+
             # 1. 预处理消息
             processed_content = self.preprocessor.process(context.content, context.type)
 

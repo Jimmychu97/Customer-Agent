@@ -33,6 +33,9 @@
 ```bash
 # 安装依赖
 uv sync
+
+# 安装 Playwright 浏览器（用于拼多多自动登录/Cookie 刷新，必须执行）
+uv run playwright install chromium
 ```
 
 ## 启动

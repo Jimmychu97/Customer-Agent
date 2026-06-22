@@ -127,6 +127,11 @@ class LifecycleMixin:
 
             token = GetToken(shop_id, user_id)
             access_token = token.get_token()
+            if not access_token:
+                error_msg = f"账号 {username} 获取 token 失败（cookie 可能已过期），请重新登录后再启动"
+                self.logger.error(error_msg)
+                on_failure(error_msg)
+                return
 
             queue_name = f"pdd_{shop_id}"
             await self._setup_message_consumer(queue_name)

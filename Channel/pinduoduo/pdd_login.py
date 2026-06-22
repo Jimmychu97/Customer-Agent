@@ -143,18 +143,23 @@ class PDDLogin():
 
             page = await context.new_page()
 
-            # 访问拼多多商家后台首页，验证登录状态
+            # 访问商家后台首页，验证登录状态
             await page.goto("https://mms.pinduoduo.com/home/")
 
-            # 等待页面加载，检查是否需要重新登录
+            # 同时等待两种结果：到达首页（有效）或跳转登录页（失效）
             try:
-                # 如果页面跳转到登录页面，说明登录状态已失效
-                await page.wait_for_url("**/login**", timeout=5000)
+                await page.wait_for_url(
+                    lambda url: "/home" in url or "/login" in url,
+                    timeout=15000
+                )
+            except asyncio.TimeoutError:
+                self.logger.warning("页面加载超时，无法判断登录状态")
+                return False
+
+            current_url = page.url
+            if "/login" in current_url:
                 self.logger.warning("登录状态已失效，需要重新登录")
                 return False
-            except asyncio.TimeoutError:
-                # 没有跳转到登录页面，说明登录状态有效
-                pass
 
             # 获取最新的cookies
             cookies_list = await context.cookies()

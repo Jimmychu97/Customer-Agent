@@ -2,24 +2,24 @@
 核销自动检测处理器
 
 规则：
-- 只有序列号  → 建 Order 记录，提示补充卡券号
-- 只有卡券号  → 建 Order 记录，提示补充序列号
-- 两个都有    → 调用外部 API 验证，成功则执行核销
+- 只有序列号/IMEI → 建 Order 记录，引导用户补充卡券号（截断链，AI不介入）
+- 只有卡券号      → 建 Order 记录，引导用户补充序列号/IMEI（截断链，AI不介入）
+- 两个都有        → 调用外部 API 验证核销
+  - 核销成功      → 发成功回复，放行链（AI可继续回答后续问题）
+  - 核销失败/异常 → 发失败回复，截断链
 """
 import re
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from bridge.context import Context, ContextType
 from .base import BaseHandler
 
 
 def _extract_imei(text: str) -> Optional[str]:
     """提取IMEI（15位纯数字，支持带空格格式 35 227917 289634 6）"""
-    # 先直接匹配15位连续数字
     m = re.search(r'(?<!\d)(\d{15})(?!\d)', text)
     if m:
         return m.group(1)
-    # 再尝试合并相邻数字段（去掉空格后为15位）
     for m in re.finditer(r'(\d[\d ]{13,20}\d)', text):
         candidate = re.sub(r'\s+', '', m.group(1))
         if len(candidate) == 15:
@@ -32,8 +32,6 @@ def _extract_serial(text: str) -> Optional[str]:
     upper = text.upper()
     for m in re.finditer(r'(?<![A-Z0-9])([A-Z0-9]{8,12})(?![A-Z0-9])', upper):
         val = m.group(1)
-        # 必须含字母（排除纯数字，避免与卡券号混淆）
-        # 且字母占比至少20%（避免误匹配纯数字+少量字母）
         letters = len(re.findall(r'[A-Z]', val))
         if letters >= 2:
             return val
@@ -47,12 +45,94 @@ def _extract_coupon(text: str) -> Optional[str]:
     return None
 
 
+# 核销结果常量
+_VOUCHER_PENDING = "pending"   # 信息不完整，引导补充
+_VOUCHER_SUCCESS = "success"   # 核销成功
+_VOUCHER_FAILED  = "failed"    # 核销失败（API返回失败）
+_VOUCHER_ERROR   = "error"     # 处理异常
+
+
+def _format_gsx_result(data) -> str:
+    """将 GSX 返回的 dict 或 list 格式化为可读文本"""
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict):
+        return str(data)
+    return "\n".join(f"{k}：{v}" for k, v in data.items())
+
+
+def _analyze_gsx_result(data) -> str:
+    """基于 GSX 返回字段生成简明中文简析"""
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    if not isinstance(data, dict):
+        return ""
+
+    lines = []
+
+    model = data.get("机型", "")
+    if model:
+        lines.append(f"● 机型：{model}")
+
+    capacity = data.get("容量", "")
+    color = data.get("颜色", "")
+    if capacity:
+        lines.append(f"● 容量：{capacity}")
+    if color:
+        lines.append(f"● 颜色：{color}")
+
+    id_status = str(data.get("ID黑白", ""))
+    if id_status:
+        ok = "Clean" in id_status or "白名单" in id_status
+        lines.append(f"● ID黑白：{'✅ 干净（白名单）' if ok else '⚠️ ' + id_status}")
+
+    lock = str(data.get("网络锁", "") or data.get("是否有锁", ""))
+    if lock:
+        if "Unlocked" in lock or "无锁" in lock:
+            lines.append("● 网络锁：✅ 无锁")
+        elif "ON" in lock or "有锁" in lock:
+            lines.append("● 网络锁：⚠️ 有锁（请确认运营商）")
+        else:
+            lines.append(f"● 网络锁：{lock}")
+
+    activation = str(data.get("激活状态", ""))
+    if activation:
+        lines.append(f"● 激活状态：{activation}")
+
+    activate_date = str(data.get("激活日期", ""))
+    if activate_date:
+        lines.append(f"● 激活日期：{activate_date}")
+
+    warranty = str(data.get("保修状态", "") or data.get("保修剩余", ""))
+    if warranty:
+        in_w = "Active" in warranty or "在保" in warranty
+        lines.append(f"● 保修：{'✅ ' if in_w else ''}{warranty}")
+
+    official_replace = str(data.get("是否官换", "") or data.get("官换", ""))
+    if official_replace:
+        replaced = official_replace.strip() in ("是", "Yes")
+        lines.append(f"● 官换机：{'⚠️ 是' if replaced else '✅ 否'}")
+
+    official_refurb = str(data.get("是否官翻机", ""))
+    if official_refurb:
+        refurb = official_refurb.strip() in ("是", "Yes")
+        lines.append(f"● 官翻机：{'⚠️ 是' if refurb else '✅ 否'}")
+
+    blacklist = str(data.get("美国黑名单", "") or data.get("黑名单状态（GSMA）", ""))
+    if blacklist:
+        clean = "Clean" in blacklist or "白名单" in blacklist
+        lines.append(f"● 黑名单：{'✅ 干净' if clean else '⚠️ ' + blacklist}")
+
+    return "\n".join(lines) if lines else ""
+
+
 class VoucherDetectionHandler(BaseHandler):
     """
     核销自动检测处理器
 
-    单条件：建 Order 记录并提示用户补充缺失信息。
-    双条件：调用外部 API 验证通过后执行核销。
+    引导中（单条件）：发引导提示，截断链（AI不介入，避免干扰核销流程）。
+    核销成功：发成功回复，放行链（AI可继续回答客户后续问题）。
+    核销失败/异常：发失败回复，截断链。
     """
 
     def __init__(self):
@@ -70,7 +150,6 @@ class VoucherDetectionHandler(BaseHandler):
 
     async def handle(self, context: Context, metadata: Dict[str, Any]) -> bool:
         content = context.content or ""
-        # IMEI 优先，其次序列号
         sn = _extract_imei(content) or _extract_serial(content)
         coupon_no = _extract_coupon(content)
 
@@ -89,10 +168,13 @@ class VoucherDetectionHandler(BaseHandler):
             f"from_uid={from_uid} shop_id={shop_id}"
         )
 
-        reply = await self._upsert_and_process_async(sn, coupon_no, shop_id, user_id, from_uid)
+        reply, status = await self._upsert_and_process_async(sn, coupon_no, shop_id, user_id, from_uid)
         if reply:
-            return await self._send(shop_id, user_id, from_uid, reply)
-        return False
+            await self._send(shop_id, user_id, from_uid, reply)
+
+        # 引导中 / 核销成功 / 失败 / 异常 → 全部截断，不让 AI 介入核销流程
+        # 核销成功后 AI 没有上下文，会误判为「缺卡券」重复引导，所以也截断
+        return True
 
     async def _upsert_and_process_async(
         self,
@@ -101,14 +183,18 @@ class VoucherDetectionHandler(BaseHandler):
         shop_id: str,
         user_id: str,
         from_uid: str,
-    ) -> Optional[str]:
-        """创建或补全 Order 记录，双条件齐备时触发 API 查询+核销"""
+    ) -> Tuple[Optional[str], str]:
+        """创建或补全 Order 记录，双条件齐备时触发 API 查询+核销
+
+        Returns:
+            (reply_text, status)，status 取常量 _VOUCHER_PENDING / _VOUCHER_SUCCESS /
+            _VOUCHER_FAILED / _VOUCHER_ERROR
+        """
         try:
             from database import db_manager
             from database.models import Order
 
             with db_manager.session_scope() as session:
-                # 查找该店铺+会话所有待处理订单（包含 sn 或 coupon 任意一方已有值的）
                 orders = (
                     session.query(Order)
                     .filter_by(shop_id=shop_id, session_id=from_uid, status=0)
@@ -116,14 +202,12 @@ class VoucherDetectionHandler(BaseHandler):
                     .all()
                 )
 
-                # 优先找能合并的：有 sn 无 coupon，或有 coupon 无 sn
                 order = None
                 for o in orders:
-                    if sn and not o.sn_imei and o.coupons:   # 本次带 sn，找有 coupon 无 sn 的
+                    if sn and not o.sn_imei and o.coupons:
                         order = o; break
-                    if coupon_no and not o.coupons and o.sn_imei:  # 本次带 coupon，找有 sn 无 coupon 的
+                    if coupon_no and not o.coupons and o.sn_imei:
                         order = o; break
-                # 没找到可合并的，取最新一条
                 if order is None and orders:
                     order = orders[0]
 
@@ -146,7 +230,6 @@ class VoucherDetectionHandler(BaseHandler):
                         f"DB sn_imei={order.sn_imei!r} coupons={order.coupons!r}，"
                         f"本次传入 sn={sn!r} coupon={coupon_no!r}"
                     )
-                    # 仅补全空字段，不覆盖已有值
                     if sn and not order.sn_imei:
                         self.logger.info(f"[核销] 补全 sn_imei={sn!r}")
                         order.sn_imei = sn
@@ -158,17 +241,17 @@ class VoucherDetectionHandler(BaseHandler):
                 order_id = order.id
                 final_serial = order.sn_imei or ""
                 final_coupon = order.coupons or ""
-                # session_scope 自动 commit
 
             self.logger.info(
                 f"[核销] Order 已保存 order_id={order_id} "
                 f"sn_imei={final_serial!r} coupons={final_coupon!r}"
             )
 
-            # 单条件：提示补充缺失字段
+            # 单条件：引导用户补充缺失字段，截断链
             if not final_serial and not final_coupon:
                 self.logger.warning(f"[核销] Order id={order_id} 双字段均为空，逻辑异常")
-                return "处理异常，请重新发送序列号或卡券号。"
+                return "处理异常，请重新发送序列号或卡券号。", _VOUCHER_ERROR
+
             if not final_serial:
                 self.logger.info(f"[核销] Order id={order_id} 缺少序列号，提示用户补充")
                 return (
@@ -181,7 +264,8 @@ class VoucherDetectionHandler(BaseHandler):
                     f"\n"
                     f"🔢 序列号\n"
                     f"设置 → 通用 → 关于本机 → 序列号"
-                )
+                ), _VOUCHER_PENDING
+
             if not final_coupon:
                 self.logger.info(f"[核销] Order id={order_id} 缺少卡券，提示用户补充")
                 return (
@@ -189,20 +273,22 @@ class VoucherDetectionHandler(BaseHandler):
                     f"\n"
                     f"请提供卡券号完成核销：\n"
                     f"待收货 → 点击商品 → 查看卡券 → 复制卡券发给客服"
-                )
+                ), _VOUCHER_PENDING
 
-            # 双条件：双字段都齐备，触发 API 查询+核销
+            # 双条件：触发核销流程
             self.logger.info(f"[核销] Order id={order_id} 双条件齐备，触发核销流程")
             await self._send(shop_id, user_id, from_uid, "好的，正在查询~")
             loop = asyncio.get_event_loop()
-            return await asyncio.to_thread(
+            result_text = await asyncio.to_thread(
                 self._query_and_verify,
                 final_serial, final_coupon, shop_id, user_id, from_uid, order_id, loop
             )
+            status = _VOUCHER_SUCCESS if result_text and "核销成功" in result_text else _VOUCHER_FAILED
+            return result_text, status
 
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] Order 处理异常: {e}")
-            return "处理时发生错误，请稍后重试。"
+            return "处理时发生错误，请稍后重试。", _VOUCHER_ERROR
 
     def _query_and_verify(
         self,
@@ -218,7 +304,6 @@ class VoucherDetectionHandler(BaseHandler):
         from Channel.pinduoduo.utils.API.mms_voucher_api import MmsVoucherAPI
         api = MmsVoucherAPI(shop_id=shop_id, user_id=user_id)
 
-        # 1. 验券
         preview = api.preview(voucher_code)
         if not preview["success"]:
             self._update_order_status(order_id, 2)
@@ -234,13 +319,11 @@ class VoucherDetectionHandler(BaseHandler):
             f"[核销] 验券成功 card_no={voucher_code} order_sn={order_sn} goods={goods_name}"
         )
 
-        # 2. 执行核销，把 order_sn 一起传入
         result = api.verification(voucher_code, store_id=store_id or 0, order_sn=order_sn or "")
         if result["success"]:
             self._update_order_status(order_id, 1)
             self.logger.info(f"[核销] 核销成功 serial={serial} card_no={voucher_code} order_id={order_id}")
 
-            # 3. 通过 goods_id + spec 匹配 ServerId，调 GSX 查询（异步，查询完再发给用户）
             if loop is not None:
                 asyncio.run_coroutine_threadsafe(
                     self._query_gsx_and_send(
@@ -274,34 +357,64 @@ class VoucherDetectionHandler(BaseHandler):
             from database.models import GoodsCommit, Order
             from Channel.pinduoduo.utils.API.gsx_api import query_gsx
 
+            # 通过 goods_id + spec_name 匹配 GoodsCommit 得到 server_id，即 GSX 的 key
             with db_manager.session_scope() as session:
                 gc = session.query(GoodsCommit).filter_by(
                     goods_id=goods_id,
                     spec_name=spec,
                 ).first()
-                server_id = gc.sku_id if gc else None
+                gsx_key = str(gc.server_id) if gc and gc.server_id else None
 
-            if not server_id:
-                self.logger.warning(f"GSX查询：未找到 goods_id={goods_id} spec={spec} 对应的 ServerId")
+            if not gsx_key:
+                self.logger.warning(
+                    f"GSX查询：未在 GoodsCommit 找到 "
+                    f"goods_id={goods_id} spec_name={spec!r} 对应的 server_id，跳过 GSX 查询"
+                )
                 return
 
-            result = await asyncio.to_thread(query_gsx, serial, server_id)
+            result = await asyncio.to_thread(query_gsx, serial, gsx_key)
             if not result["success"]:
                 self.logger.warning(f"[核销] GSX查询失败 sn={serial}: {result.get('error_msg')}")
                 return
 
             gsx_data = result["data"]
-            self.logger.info(f"[核销] GSX查询完成 server_id={server_id} sn={serial}")
+            self.logger.info(f"[核销] GSX查询完成 sn={serial} key={gsx_key}")
 
+            # 保存查询结果
             with db_manager.session_scope() as session:
                 order = session.query(Order).filter_by(id=order_id).first()
                 if order:
-                    order.sku_id = server_id
+                    order.sku_id = gsx_key
                     order.gsx_result = json.dumps(gsx_data, ensure_ascii=False)
 
-            gsx_text = json.dumps(gsx_data, ensure_ascii=False)
+            # 格式化 GSX 结果为可读文本
+            gsx_text = _format_gsx_result(gsx_data)
             fixed = "亲，五行好平+关注+收藏+截图+文字好平赏个。以后有关于这部机器的验机问题，都可以随时联系美高技术员，技术员将为您解答！非常感谢您选择我们,祝你购机愉快~"
-            await self._send(shop_id, user_id, from_uid, f"{gsx_text}\n\n{fixed}")
+
+            # 生成 AI 简析
+            analysis = _analyze_gsx_result(gsx_data)
+            report_msg = gsx_text
+            if analysis:
+                report_msg = f"{gsx_text}\n\n📊 验机报告简析：\n{analysis}"
+
+            # 先发报告+简析，再单独发结语
+            await self._send(shop_id, user_id, from_uid, report_msg)
+            await self._send(shop_id, user_id, from_uid, fixed)
+
+            # 将 GSX 报告写入 AI 会话历史，客户费用后续问问题时 AI 有数据可分析
+            try:
+                from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
+                from core.di_container import container
+                agent: CustomerAgent = container.get(CustomerAgent)
+                if agent._session_manager:
+                    session_id = f"pinduoduo{from_uid}"
+                    agent._session_manager.add_message(
+                        session_id=session_id,
+                        role="assistant",
+                        content=f"[已完成 GSX 验机查询，报告内容如下，如有问题可直接询问]\n{gsx_text}",
+                    )
+            except Exception as e:
+                self.logger.debug(f"GSX报告写入会话失败（不影响发送）: {e}")
 
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] GSX查询失败: {e}")
