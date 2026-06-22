@@ -81,6 +81,7 @@ uv run playwright install chromium
 
 ```bash
 python app.py
+uv run python app.py
 ```
 
 首次运行会自动在项目根目录生成 `config.json` 配置文件。

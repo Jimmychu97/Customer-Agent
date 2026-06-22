@@ -17,10 +17,7 @@ dist
 build
 .venv
 user_data/
-*.db
-*.db
 config.json
-temp/
 .claude/
 
 # Backup directories
@@ -32,7 +29,6 @@ backup/
 .serena/
 
 # Temporary and cache files
-temp/
 tmp/
 *.tmp
 *.temp

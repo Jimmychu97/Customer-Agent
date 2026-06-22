@@ -256,7 +256,6 @@ class GoodsManagementWidget(QWidget):
                     shop_id=self._selected_db_shop_id
                 ).order_by(ProductKnowledge.goods_name).all()
 
-                # 已同步的 goods_id 集合
                 synced_ids = {
                     gc.goods_id
                     for gc in session.query(GoodsCommit.goods_id).filter_by(
@@ -276,6 +275,7 @@ class GoodsManagementWidget(QWidget):
 
             self._populate_goods_table()
             self.status_label.setText(f"共 {len(self._goods_data)} 个商品")
+            self.sync_btn.setEnabled(True)  # 加载完成后启用按鈕
         except Exception as e:
             logger.error(f"加载商品列表失败: {e}")
 
