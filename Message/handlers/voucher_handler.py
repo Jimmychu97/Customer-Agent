@@ -176,98 +176,17 @@ class VoucherDetectionHandler(BaseHandler):
             f"from_uid={from_uid} shop_id={shop_id}"
         )
 
-        reply, status = await self._upsert_and_process_async(sn, coupon_no, shop_id, user_id, from_uid)
-        if reply:
-            await self._send(shop_id, user_id, from_uid, reply)
-
-        # 引导中 / 核销成功 / 失败 / 异常 → 全部截断，不让 AI 介入核销流程
-        # 核销成功后 AI 没有上下文，会误判为「缺卡券」重复引导，所以也截断
-        return True
-
-    async def _upsert_and_process_async(
-        self,
-        sn: Optional[str],
-        coupon_no: Optional[str],
-        shop_id: str,
-        user_id: str,
-        from_uid: str,
-    ) -> Tuple[Optional[str], str]:
-        """创建或补全 Order 记录，双条件齐备时触发 API 查询+核销
-
-        Returns:
-            (reply_text, status)，status 取常量 _VOUCHER_PENDING / _VOUCHER_SUCCESS /
-            _VOUCHER_FAILED / _VOUCHER_ERROR
-        """
-        try:
-            from database import db_manager
-            from database.models import Order
-
-            with db_manager.session_scope() as session:
-                # 不再以 from_uid 匹配最新单，改为以卡券号或序列号定位具体的一单
-                # 优先级：卡券号 > 序列号（卡券号唯一性更强）
-                order = None
-
-                if coupon_no:
-                    # 卡券号唯一，用卡券号精确匹配已有单
-                    # 如果同一张卡券已建单（等序列号），则补全序列号
-                    # 如果这张卡券还没建单，新建，提示用户发序列号
-                    order = session.query(Order).filter_by(
-                        shop_id=shop_id,
-                        session_id=from_uid,
-                        coupons=coupon_no,
-                        status=0,
-                    ).first()
-
-                else:
-                    # 序列号/IMEI：直接新建单
-                    # 同一序列号可能对应多个不同服务的卡券，不能自动匹配旧单
-                    order = None
-
-                if order is None:
-                    self.logger.info(
-                        f"[核销] 未找到已有 Order，新建记录 "
-                        f"sn={sn!r} coupon={coupon_no!r} from_uid={from_uid}"
-                    )
-                    order = Order(
-                        shop_id=shop_id,
-                        session_id=from_uid,
-                        sn_imei=sn or "",
-                        coupons=coupon_no or "",
-                        status=0,
-                    )
-                    session.add(order)
-                else:
-                    self.logger.info(
-                        f"[核销] 找到已有 Order id={order.id}，"
-                        f"DB sn_imei={order.sn_imei!r} coupons={order.coupons!r}，"
-                        f"本次传入 sn={sn!r} coupon={coupon_no!r}"
-                    )
-                    if sn and not order.sn_imei:
-                        self.logger.info(f"[核销] 补全 sn_imei={sn!r}")
-                        order.sn_imei = sn
-                    if coupon_no and not order.coupons:
-                        self.logger.info(f"[核销] 补全 coupons={coupon_no!r}")
-                        order.coupons = coupon_no
-
-                session.flush()
-                order_id = order.id
-                final_serial = order.sn_imei or ""
-                final_coupon = order.coupons or ""
-
-            self.logger.info(
-                f"[核销] Order 已保存 order_id={order_id} "
-                f"sn_imei={final_serial!r} coupons={final_coupon!r}"
-            )
-
-            # 单条件：引导用户补充缺失字段，截断链
-            if not final_serial and not final_coupon:
-                self.logger.warning(f"[核销] Order id={order_id} 双字段均为空，逻辑异常")
-                return "处理异常，请重新发送序列号或卡券号。", _VOUCHER_ERROR
-
-            if not final_serial:
-                self.logger.info(f"[核销] Order id={order_id} 缺少序列号，提示用户补充")
-                return (
-                    f"✅ 已记录您的卡券号：{final_coupon}\n"
+        # 只有卡券，没有序列号/IMEI → 存单后检查是否已凑齐
+        if coupon_no and not sn:
+            final_sn, final_coupon, order_id = await self._upsert_order(sn, coupon_no, shop_id, from_uid)
+            if final_sn and final_coupon:
+                # 凑齐了，触发核销
+                reply, _ = await self._do_verify(final_sn, final_coupon, shop_id, user_id, from_uid, order_id)
+                if reply:
+                    await self._send(shop_id, user_id, from_uid, reply)
+            else:
+                await self._send(shop_id, user_id, from_uid,
+                    f"✅ 已记录您的卡券号：{coupon_no}\n"
                     f"\n"
                     f"请继续提供以下任意一项完成核销：\n"
                     f"\n"
@@ -276,31 +195,104 @@ class VoucherDetectionHandler(BaseHandler):
                     f"\n"
                     f"🔢 序列号\n"
                     f"设置 → 通用 → 关于本机 → 序列号"
-                ), _VOUCHER_PENDING
+                )
+            return True
 
-            if not final_coupon:
-                self.logger.info(f"[核销] Order id={order_id} 缺少卡券，提示用户补充")
-                return (
-                    f"✅ 已记录您的序列号/IMEI：{final_serial}\n"
+        # 只有序列号/IMEI，没有卡券 → 存单后检查是否已凑齐
+        if sn and not coupon_no:
+            final_sn, final_coupon, order_id = await self._upsert_order(sn, coupon_no, shop_id, from_uid)
+            if final_sn and final_coupon:
+                # 凑齐了，触发核销
+                reply, _ = await self._do_verify(final_sn, final_coupon, shop_id, user_id, from_uid, order_id)
+                if reply:
+                    await self._send(shop_id, user_id, from_uid, reply)
+            else:
+                await self._send(shop_id, user_id, from_uid,
+                    f"✅ 已记录您的序列号/IMEI：{sn}\n"
                     f"\n"
                     f"请提供卡券号完成核销：\n"
                     f"待收货 → 点击商品 → 查看卡券 → 复制卡券发给客服"
-                ), _VOUCHER_PENDING
+                )
+            return True
 
-            # 双条件：触发核销流程
-            self.logger.info(f"[核销] Order id={order_id} 双条件齐备，触发核销流程")
-            await self._send(shop_id, user_id, from_uid, "好的，正在查询~")
-            loop = asyncio.get_event_loop()
-            result_text = await asyncio.to_thread(
-                self._query_and_verify,
-                final_serial, final_coupon, shop_id, user_id, from_uid, order_id, loop
-            )
-            status = _VOUCHER_SUCCESS if result_text and "核销成功" in result_text else _VOUCHER_FAILED
-            return result_text, status
+        # 同一条消息里两个都有 → 直接核销
+        _, __, order_id = await self._upsert_order(sn, coupon_no, shop_id, from_uid)
+        reply, _ = await self._do_verify(sn, coupon_no, shop_id, user_id, from_uid, order_id)
+        if reply:
+            await self._send(shop_id, user_id, from_uid, reply)
+        return True
 
+    async def _upsert_order(
+        self,
+        sn: Optional[str],
+        coupon_no: Optional[str],
+        shop_id: str,
+        from_uid: str,
+    ) -> Tuple[str, str, Optional[int]]:
+        """建单或补全已有单
+
+        Returns:
+            (final_sn, final_coupon, order_id)
+        """
+        try:
+            from database import db_manager
+            from database.models import Order
+            from datetime import datetime as dt, timedelta
+
+            ten_min_ago = dt.now() - timedelta(minutes=10)
+            with db_manager.session_scope() as session:
+                order = session.query(Order).filter(
+                    Order.shop_id == shop_id,
+                    Order.session_id == from_uid,
+                    Order.status == 0,
+                    Order.created_at >= ten_min_ago,
+                ).order_by(Order.id.desc()).first()
+
+                if order is None:
+                    order = Order(
+                        shop_id=shop_id,
+                        session_id=from_uid,
+                        sn_imei=sn or "",
+                        coupons=coupon_no or "",
+                        status=0,
+                    )
+                    session.add(order)
+                    session.flush()
+                    self.logger.info(f"[核销] 新建 Order sn={sn!r} coupon={coupon_no!r}")
+                else:
+                    if sn and not order.sn_imei:
+                        order.sn_imei = sn
+                    if coupon_no and not order.coupons:
+                        order.coupons = coupon_no
+                    session.flush()
+                    self.logger.info(f"[核销] 补全 Order id={order.id} sn={order.sn_imei!r} coupon={order.coupons!r}")
+
+                return order.sn_imei or "", order.coupons or "", order.id
         except Exception as e:
-            self.logger.opt(exception=True).error(f"[核销] Order 处理异常: {e}")
-            return "处理时发生错误，请稍后重试。", _VOUCHER_ERROR
+            self.logger.error(f"[核销] 建单失败: {e}")
+            return sn or "", coupon_no or "", None
+
+    async def _do_verify(
+        self,
+        sn: str,
+        coupon_no: str,
+        shop_id: str,
+        user_id: str,
+        from_uid: str,
+        order_id: Optional[int],
+    ) -> Tuple[Optional[str], str]:
+        """触发核销流程，核销成功后串行 await GSX查询+LLM分析"""
+        self.logger.info(f"[核销] 双条件齐备，触发核销 order_id={order_id}")
+        await self._send(shop_id, user_id, from_uid, "好的，正在查询~")
+        result_text, gsx_params = await asyncio.to_thread(
+            self._query_and_verify,
+            sn, coupon_no, shop_id, user_id, from_uid, order_id
+        )
+        status = _VOUCHER_SUCCESS if result_text and "核销成功" in result_text else _VOUCHER_FAILED
+        if status == _VOUCHER_SUCCESS and gsx_params:
+            goods_id, spec = gsx_params
+            await self._query_gsx_and_send(sn, goods_id, spec, order_id, shop_id, user_id, from_uid)
+        return result_text, status
 
     def _query_and_verify(
         self,
@@ -310,16 +302,15 @@ class VoucherDetectionHandler(BaseHandler):
         user_id: str,
         from_uid: str,
         order_id: int,
-        loop: asyncio.AbstractEventLoop = None,
-    ) -> str:
-        """MMS 验券 + 核销"""
+    ) -> Tuple[str, Optional[Tuple[str, str]]]:
+        """MMS 验券 + 核销，返回 (result_text, gsx_params)"""
         from Channel.pinduoduo.utils.API.mms_voucher_api import MmsVoucherAPI
         api = MmsVoucherAPI(shop_id=shop_id, user_id=user_id)
 
         preview = api.preview(voucher_code)
         if not preview["success"]:
             self._update_order_status(order_id, 2)
-            return f"验券失败：{preview.get('error_msg', '未知错误')}"
+            return f"验券失败：{preview.get('error_msg', '未知错误')}", None
 
         goods_name = preview.get("goods_name", "")
         spec = preview.get("spec", "")
@@ -335,15 +326,7 @@ class VoucherDetectionHandler(BaseHandler):
         if result["success"]:
             self._update_order_status(order_id, 1)
             self.logger.info(f"[核销] 核销成功 serial={serial} card_no={voucher_code} order_id={order_id}")
-
-            if loop is not None:
-                asyncio.run_coroutine_threadsafe(
-                    self._query_gsx_and_send(
-                        serial, str(preview.get("goods_id", "")), spec, order_id, shop_id, user_id, from_uid
-                    ),
-                    loop
-                )
-
+            gsx_params = (str(preview.get("goods_id", "")), spec)
             return (
                 f"核销成功！\n"
                 f"序列号/IMEI：{serial}\n"
@@ -352,11 +335,11 @@ class VoucherDetectionHandler(BaseHandler):
                 + (f"规格：{spec}\n" if spec else "")
                 + f"订单号：{order_sn}\n"
                 f"订单金额：{order_amount / 100:.2f}元"
-            )
+            ), gsx_params
         else:
             self.logger.warning(f"[核销] 核销失败 card_no={voucher_code} order_id={order_id} err={result.get('error_msg')}")
             self._update_order_status(order_id, 2)
-            return f"核销失败：{result.get('error_msg', '未知错误')}\n卡券号：{voucher_code}"
+            return f"核销失败：{result.get('error_msg', '未知错误')}\n卡券号：{voucher_code}", None
 
     async def _query_gsx_and_send(
         self, serial: str, goods_id: str, spec: str,
@@ -434,7 +417,10 @@ class VoucherDetectionHandler(BaseHandler):
             api_key = config.get("llm.api_key", "")
             api_base = config.get("llm.api_base", "")
             model_name = config.get("llm.model_name", "")
+
+            self.logger.info(f"[核销] GSX分析 api_key={'有' if api_key else '无'} model={model_name!r} base={api_base!r}")
             if not api_key or not model_name:
+                self.logger.warning(f"[核销] LLM配置缺失，跳过GSX分析")
                 return ""
 
             client = AsyncOpenAI(api_key=api_key, base_url=api_base or None, timeout=30)
@@ -452,7 +438,7 @@ class VoucherDetectionHandler(BaseHandler):
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
-            self.logger.warning(f"LLM 分析 GSX 报告失败: {e}")
+            self.logger.opt(exception=True).warning(f"[核销] LLM 分析 GSX 报告失败: {e}")
             return ""
 
     def _update_order_status(self, order_id: int, status: int) -> None:
@@ -471,7 +457,12 @@ class VoucherDetectionHandler(BaseHandler):
         try:
             from Channel.pinduoduo.utils.API.send_message import SendMessage
             result = SendMessage(shop_id, user_id).send_text(from_uid, text)
-            return isinstance(result, dict) and result.get("success", False)
+            success = isinstance(result, dict) and result.get("success", False)
+            if success:
+                self.logger.info(f"[核销] 发送成功 from_uid={from_uid} text={text[:30]!r}")
+            else:
+                self.logger.warning(f"[核销] 发送失败 from_uid={from_uid} result={result}")
+            return success
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] 发送回复失败 from_uid={from_uid}: {e}")
             return False
