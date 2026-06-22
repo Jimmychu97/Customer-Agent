@@ -1,166 +1,81 @@
-# Technology Stack and Development Setup
+# Technology Stack
 
-## Programming Languages and Versions
-- **Primary Language**: Python 3.11+ (requires >=3.11)
-- **Platform**: Windows (primary), with potential Linux/macOS support via PyQt6
-- **Build System**: Hatchling (specified in pyproject.toml)
+## Language & Runtime
+- Python >= 3.11（使用 `.python-version` 锁定版本）
+- Windows 为主要运行平台（可打包为 exe）
+
+## Build & Dependency Management
+- **uv** 管理依赖（`uv sync` 安装）
+- **hatchling** 作为 build backend
+- **PyInstaller** 用于打包 Windows exe（optional dependency）
 
 ## Core Dependencies
 
-### UI Framework
-- `pyqt6>=6.9.0`: Qt6 framework for desktop UI
-- `pyqt6-fluent-widgets>=1.9.0`: Modern Fluent Design UI components
-
-### AI and ML
-- `openai>=1.109.1`: OpenAI-compatible API client (supports multiple LLM providers)
-- `volcengine>=1.0.209`: Volcano Engine/ByteDance LLM support
-- `tiktoken>=0.12.0`: Token counting for LLM context management
-- `jieba>=0.42.1`: Chinese text segmentation for knowledge base retrieval
-
-### Data and Database
-- `sqlalchemy>=2.0.43`: ORM for SQLite database
-- `pandas>=2.1.0,<2.3.0`: Data manipulation and analysis
-- `numpy>=1.24.0,<2.0.0`: Numerical computing
-
-### Web and Networking
-- `websockets>=10.4`: WebSocket client/server for real-time messaging
-- `requests>=2.28.0`: HTTP client for API calls
-- `aiohttp>=3.13.2`: Asynchronous HTTP client
-- `aiofiles>=25.1.0`: Async file operations
-
-### Document Processing
-- `pypdf`: PDF document parsing
-- `python-docx>=1.2.0`: Word document processing
-- `openpyxl>=3.1.5`: Excel file handling
-- `xlrd>=2.0.2`: Legacy Excel file support
-
-### Configuration and Validation
-- `pydantic>=2.5.0`: Data validation and settings management
-- Configuration uses Pydantic models with type safety
-
-### Logging and Utilities
-- `loguru>=0.7.0`: Modern, structured logging
-- `pillow>=12.0.0`: Image processing for UI
-
-### Build Dependencies (optional)
-- `pyinstaller>=6.0.0`: For creating Windows executables
+| 类别 | 包 | 说明 |
+|------|-----|------|
+| UI | pyqt6 >= 6.9.0 | 桌面界面框架 |
+| UI | pyqt6-fluent-widgets >= 1.9.0 | Fluent Design 组件库 |
+| AI | openai >= 1.109.1 | OpenAI 兼容 API 客户端 |
+| AI | tiktoken >= 0.12.0 | Token 统计 |
+| 数据库 | sqlalchemy >= 2.0.43 | ORM |
+| 配置 | pydantic >= 2.5.0 | 配置模型验证 |
+| 异步 | websockets >= 10.4 | WebSocket 客户端 |
+| 异步 | aiohttp >= 3.13.2 | 异步 HTTP 客户端 |
+| 异步 | aiofiles >= 25.1.0 | 异步文件操作 |
+| 日志 | loguru >= 0.7.0 | 结构化日志 |
+| 分词 | jieba >= 0.42.1 | 中文分词（知识库检索） |
+| 文档解析 | pypdf | PDF 解析 |
+| 文档解析 | python-docx >= 1.2.0 | Word 文档解析 |
+| 文档解析 | openpyxl >= 3.1.5 | Excel 解析 |
+| 文档解析 | xlrd >= 2.0.2 | 旧版 Excel 解析 |
+| 数据 | pandas >= 2.1.0,<2.3.0 | 数据处理 |
+| 数据 | numpy >= 1.24.0,<2.0.0 | 数值计算 |
+| 浏览器自动化 | playwright >= 1.52.0 | 拼多多自动登录 |
+| 图像 | pillow >= 12.0.0 | 图像处理 |
+| HTTP | requests >= 2.28.0 | 同步 HTTP 请求 |
+| 火山引擎 | volcengine >= 1.0.209 | 火山引擎 SDK（语音/模型） |
 
 ## Development Commands
 
-### Installation
 ```bash
-# Install dependencies using uv (recommended)
+# 安装依赖
 uv sync
 
-# Or using pip (if uv not available)
-pip install -e .
-```
-
-### Running the Application
-```bash
-# Start the main application
+# 启动应用
 python app.py
-```
 
-### Building Executable
-```bash
-# Build Windows executable
+# 打包 Windows exe（Windows 上运行）
 python scripts/build_win_exe.py --clean
-
-# Build output location: dist/AgentCustomer/
 ```
 
-### Testing and Development
-```bash
-# Test specific components
-python scripts/test_sku.py  # Test SKU/Product functionality
+## Configuration System
+- 运行时配置：`config.json`（首次运行自动生成）
+- 配置模型：Pydantic `ConfigModel`，支持 `config.get("llm.api_key")` 点号嵌套访问
+- 线程安全：`threading.RLock()` 保护所有读写操作
+- 原子保存：临时文件 + `replace()` 原子重命名，防止配置文件损坏
 
-# Install Playwright browsers (for web automation)
-python scripts/install_playwright.py
-```
+## Database
+- SQLite（文件路径：`./temp/channel_shop.db`，可通过 `config.json` 的 `db_path` 配置）
+- SQLAlchemy 2.0 ORM（使用 `Session` 上下文管理器）
+- 知识库存储在同一 SQLite 数据库中
 
-## Development Environment Setup
+## AI / LLM Integration
+- 通过 OpenAI Python SDK 调用任意兼容 API（DeepSeek、Kimi、Gemini、Claude 等）
+- 自研 Agent 框架，工具定义通过 `@tool` 装饰器注册
+- 支持多模态 LLM（商品图片知识提取）
+- 嵌入模型通过 `config.json` 的 `embedder` 配置
 
-### 1. Python Environment
-```bash
-# Ensure Python 3.11+ is installed
-python --version  # Should show 3.11.x or higher
+## Logging
+- Loguru 框架，通过 `get_logger("ModuleName")` 获取 logger
+- 日志文件：`logs/app.log`
+- 支持 `logging_context.py` 上下文绑定
 
-# Set up virtual environment (optional with uv)
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+## Async Architecture
+- asyncio 事件循环运行在独立线程（与 Qt 主线程分离）
+- `utils/async_helper.py` 提供 Qt ↔ asyncio 桥接
+- WebSocket 连接、消息队列消费均为 async 协程
 
-# Install uv package manager (recommended)
-pip install uv
-```
-
-### 2. Project Configuration
-1. **First Run**: Application automatically creates `config.json` with default settings
-2. **Required Configuration**:
-   - LLM API settings (model name, API key, base URL)
-   - Pinduoduo platform credentials (client_id, client_secret, access_token)
-   - GSX verification API credentials (if using device verification)
-
-### 3. Database Setup
-- SQLite database automatically created at `temp/channel_shop.db`
-- No manual database setup required
-- Product knowledge automatically synced from Pinduoduo API
-
-### 4. Platform Integration
-- Requires Pinduoduo seller account credentials
-- WebSocket connection to Pinduoduo customer service system
-- API access for product data and message sending
-
-## File Structure and Build Configuration
-
-### Key Configuration Files
-- `pyproject.toml`: Project metadata and dependencies
-- `config.json`: User configuration (auto-generated)
-- `uv.lock`: Dependency lock file (if using uv)
-- `.python-version`: Python version specification
-
-### Build Configuration
-- **Entry Point**: `app.py`
-- **Package Structure**: Multiple namespace packages (Agent, Channel, Message, etc.)
-- **Windows Build**: PyInstaller configuration in `scripts/build_exe.py`
-- **Icon Files**: Located in `icon/` directory
-
-## Technology Patterns
-
-### 1. Async Patterns
-- WebSocket connections use `asyncio` and `websockets`
-- Message queue processing is asynchronous
-- File operations use `aiofiles` for async I/O
-
-### 2. DI Container Pattern
-- All services managed through DI container
-- Prevents tight coupling between components
-- Enables easier testing and mocking
-
-### 3. Configuration Management
-- Thread-safe configuration access
-- Automatic validation with Pydantic
-- Support for nested configuration paths
-
-### 4. Logging Strategy
-- Structured logging with Loguru
-- Log files stored in `logs/` directory
-- Rotating logs with proper file management
-
-## Platform-Specific Considerations
-
-### Windows-Specific
-- Built and tested primarily on Windows
-- Executable packaging optimized for Windows
-- Uses Windows-specific browser paths for Playwright
-
-### Cross-Platform Potential
-- PyQt6 supports Linux and macOS
-- Database uses SQLite (cross-platform)
-- Most dependencies are cross-platform
-
-## Performance Considerations
-- Asynchronous message processing for high concurrency
-- Connection pooling for database access
-- Caching layer for frequently accessed data
-- Token counting to manage LLM context windows
+## Packaging (Windows exe)
+- PyInstaller + `.spec` 文件（`scripts/agent_customer.spec`）
+- Playwright 浏览器路径通过 `PLAYWRIGHT_BROWSERS_PATH` 环境变量配置
+- 打包产物：`dist/AgentCustomer/`

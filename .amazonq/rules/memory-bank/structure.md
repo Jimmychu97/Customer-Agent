@@ -1,125 +1,141 @@
-# Project Structure and Architecture
+# Project Structure
 
-## Directory Structure Overview
+## Directory Overview
+
 ```
-Agent-Customer/
-├── Agent/                  # AI Agent Module (Custom Agent Framework)
+Customer-Agent/
+├── app.py                  # 应用入口，全局单例初始化顺序管理
+├── config.py               # 配置管理（Pydantic 验证 + 线程安全）
+├── config.json             # 运行时配置文件（自动生成）
+├── pyproject.toml          # 项目依赖声明（uv 管理）
+│
+├── Agent/                  # AI 代理模块
+│   ├── bot.py              # Bot 工厂/入口
 │   └── CustomerAgent/
-│       ├── custom/         # Custom implementation: LLM client, session management, tool executor
-│       └── tools/          # Agent toolset (product/knowledge/human transfer)
-├── Channel/                # Channel Integration
+│       ├── custom/         # 自研 Agent 框架核心
+│       │   ├── customer_agent.py   # Agent 主逻辑（多轮工具调用循环）
+│       │   ├── llm_client.py       # OpenAI 兼容 API 客户端
+│       │   ├── session_manager.py  # 会话上下文（消息历史）管理
+│       │   ├── tool_executor.py    # 工具注册与执行
+│       │   ├── tool_decorator.py   # @tool 装饰器定义
+│       │   ├── message_builder.py  # LLM 消息构造辅助
+│       │   └── agent_config.py     # Agent 配置项
+│       └── tools/          # Agent 工具集
+│           ├── get_product_list.py
+│           ├── get_product_knowledge.py
+│           ├── send_goods_link.py
+│           ├── search_customer_service_knowledge.py
+│           ├── move_conversation.py
+│           ├── coupon_query.py
+│           ├── get_voucher_code.py
+│           ├── use_voucher.py
+│           └── verify_voucher.py
+│
+├── Channel/                # 渠道集成
+│   ├── channel.py          # 渠道抽象基类
 │   └── pinduoduo/
-│       ├── core/           # Connection, lifecycle, status, message handling split modules
-│       └── utils/API/      # Pinduoduo API wrappers
-├── Message/                # Message Processing (Queue + Handler Chain)
-│   ├── core/               # consumer / handlers / queue
-│   └── handlers/           # preprocessor, AI, keyword handlers
-├── bridge/                 # Bridge Module (Context/Reply)
-├── core/                   # Core Services (DI container, cache, connection status)
-├── database/               # Database (SQLAlchemy + knowledge service + product sync)
-├── ui/                     # PyQt6 User Interface
-├── utils/                  # Utility Modules (logging, paths, etc.)
-├── scripts/                # Build scripts
-└── app.py                  # Application entry point
+│       ├── pdd_channel.py  # 拼多多渠道主类
+│       ├── pdd_login.py    # Playwright 自动化登录
+│       ├── pdd_message.py  # 消息模型
+│       ├── cookie_cache.py # Cookie 缓存管理
+│       ├── cookie_utils.py # Cookie 工具函数
+│       ├── core/           # 拆分的连接核心模块
+│       │   ├── pdd_connection.py   # WebSocket 连接管理
+│       │   ├── pdd_lifecycle.py    # 连接生命周期
+│       │   ├── pdd_status.py       # 连接状态
+│       │   ├── pdd_message_handler.py  # 消息解析处理
+│       │   ├── pdd_config.py       # 连接配置
+│       │   └── pdd_utils.py        # 工具函数
+│       └── utils/API/      # 拼多多 API 封装
+│
+├── Message/                # 消息处理系统
+│   ├── message.py          # 消息模型
+│   ├── core/
+│   │   ├── queue.py        # 异步消息队列（queue_manager 单例）
+│   │   ├── consumer.py     # 消息消费者（message_consumer_manager 单例）
+│   │   └── handlers.py     # 处理器链调度
+│   ├── handlers/           # 具体处理器
+│   │   ├── base.py         # 处理器基类
+│   │   ├── preprocessor.py # 预处理器（过滤/格式化）
+│   │   ├── ai_handler.py   # AI 回复处理器
+│   │   ├── keyword_handler.py  # 关键词处理器
+│   │   └── voucher_handler.py  # 券码处理器
+│   └── models/
+│       └── queue_models.py # 队列消息数据模型
+│
+├── bridge/                 # 渠道与消息处理的桥接层
+│   ├── context.py          # 入站消息上下文模型（Pydantic）
+│   └── reply.py            # 出站回复模型
+│
+├── core/                   # 核心基础服务
+│   ├── di_container.py     # 依赖注入容器（DIContainer）
+│   ├── service_providers.py    # _DIProxy 懒代理（向后兼容层）
+│   ├── connection_status.py    # ConnectionStatusManager 单例
+│   ├── cache.py            # 缓存管理器（cache_manager 单例）
+│   ├── base_service.py     # 服务基类
+│   └── __init__.py         # 导出 container
+│
+├── database/               # 数据持久化
+│   ├── db_manager.py       # SQLAlchemy 数据库管理器（DI 单例）
+│   ├── models.py           # ORM 模型定义
+│   ├── knowledge_service.py    # 知识库 CRUD 服务（DI 单例）
+│   ├── product_sync.py     # 拼多多商品同步服务
+│   └── connection_pool.py  # 数据库连接池配置
+│
+├── ui/                     # PyQt6 用户界面
+│   ├── main_ui.py          # 主窗口
+│   ├── auto_reply/         # 自动回复功能模块（含线程管理）
+│   ├── goods_ui.py         # 商品管理页
+│   ├── knowledge_ui.py     # 知识库管理页
+│   ├── keyword_ui.py       # 关键词配置页
+│   ├── setting_ui.py       # 设置页
+│   ├── log_ui.py           # 日志查看页
+│   └── voucher_ui.py       # 优惠券管理页
+│
+├── utils/                  # 通用工具
+│   ├── logger_loguru.py    # Loguru 日志封装（get_logger 工厂）
+│   ├── logging_context.py  # 日志上下文管理
+│   ├── async_helper.py     # 异步辅助（Qt-asyncio 桥接）
+│   ├── path_utils.py       # 路径工具（打包兼容）
+│   ├── runtime_path.py     # 运行时路径解析
+│   ├── encoding_helper.py  # 编码处理
+│   ├── file_validator.py   # 文件校验
+│   └── resource_manager.py # 资源管理
+│
+└── scripts/                # 构建脚本
+    ├── build_win_exe.py    # Windows exe 打包
+    └── agent_customer.spec # PyInstaller spec 文件
 ```
 
-## Core Components and Relationships
+## Core Components & Relationships
 
-### 1. Agent Module (Agent/)
-- **CustomerAgent/custom/**: Custom-built Agent framework components
-  - `agent_config.py`: Agent configuration management
-  - `customer_agent.py`: Main AI customer service agent
-  - `llm_client.py`: LLM API client implementation
-  - `session_manager.py`: Conversation session management
-  - `tool_executor.py`: Tool execution and orchestration
-- **CustomerAgent/tools/**: AI Agent tools (10+ specialized tools)
-  - Product query tools (`get_product_knowledge.py`, `get_product_list.py`)
-  - Knowledge search tools (`search_customer_service_knowledge.py`)
-  - Customer interaction tools (`send_goods_link.py`, `move_conversation.py`)
-  - Voucher management tools (`coupon_query.py`, `get_voucher_code.py`)
+### 初始化顺序（app.py 强制规定）
+```
+config → DIContainer.configure_standard_services() → db_manager → UI
+```
 
-### 2. Channel Integration (Channel/)
-- **pinduoduo/**: Pinduoduo platform-specific integration
-  - **core/**: Connection management and message handling
-    - `pdd_connection.py`: WebSocket connection management
-    - `pdd_message_handler.py`: Message processing logic
-    - `pdd_lifecycle.py`: Connection lifecycle management
-  - **utils/API/**: Pinduoduo API wrappers (11+ API modules)
-    - Product management (`product_manager.py`, `goods_commit_api.py`)
-    - User and shop information (`get_user_info.py`, `get_shop_info.py`)
-    - Message sending (`send_message.py`)
-    - Authentication (`get_token.py`)
+### 数据流
+```
+WebSocket (PDD) → pdd_message_handler → Message Queue → Consumer
+    → Handler Chain [preprocessor → keyword → AI → voucher]
+    → bridge.Reply → PDD API 发送
+```
 
-### 3. Message Processing System (Message/)
-- **core/**: Message processing infrastructure
-  - `queue.py`: Asynchronous message queue implementation
-  - `consumer.py`: Message consumer management
-  - `handlers.py`: Handler registration and orchestration
-- **handlers/**: Specialized message handlers
-  - `ai_handler.py`: AI response generation
-  - `keyword_handler.py`: Keyword detection and processing
-  - `preprocessor.py`: Message preprocessing
-  - `voucher_handler.py`: Voucher-related message handling
+### 依赖注入模式
+- `DIContainer`（core/di_container.py）管理 `ConnectionStatusManager`、`DatabaseManager`、`KnowledgeService` 的单例
+- `_DIProxy` 代理类提供向后兼容（`from database import db_manager` 即可使用）
+- 其他服务（`queue_manager`、`cache_manager`）通过模块级单例直接使用
 
-### 4. Core Services (core/)
-- `di_container.py`: Dependency injection container for service management
-- `base_service.py`: Base service class with common functionality
-- `connection_status.py`: Connection state management
-- `cache.py`: Application-level caching
-- `service_providers.py`: Service provider registrations
-
-### 5. Data Layer (database/)
-- `db_manager.py`: Database connection and session management
-- `models.py`: SQLAlchemy ORM models
-- `knowledge_service.py`: Knowledge base CRUD operations
-- `product_sync.py`: Product data synchronization from API
-
-### 6. UI Layer (ui/)
-- `main_ui.py`: Main application window
-- Specialized UI modules for different features (goods, keywords, knowledge, etc.)
-- **auto_reply/**: Auto-reply system UI components
+### Bridge 层（渠道解耦）
+- `Context`（Pydantic BaseModel）：入站消息的统一表示，携带渠道专用 kwargs（如 `PinduoduoKwargs`）
+- `Reply`：出站回复的统一表示
+- 使得 Message 处理层与具体渠道实现解耦
 
 ## Architectural Patterns
 
-### 1. Dependency Injection
-- Central DI container (`core/di_container.py`) manages all service lifecycles
-- Services are registered via `configure_standard_services()`
-- Prevents circular dependencies through lazy loading
-
-### 2. Message Queue Pattern
-- Asynchronous message processing via handler chain
-- Each message passes through multiple handlers (preprocessor → AI → keyword)
-- Supports high-concurrency scenarios
-
-### 3. Modular Channel Architecture
-- Channel-agnostic base with platform-specific implementations
-- Each channel manages its own connection lifecycle
-- Shared connection status monitoring
-
-### 4. Agent Framework
-- Custom-built AI agent framework (not dependent on LangChain/AutoGen)
-- Tool-based execution with multi-turn conversation context
-- Configurable prompt templates and instructions
-
-### 5. Configuration Management
-- Type-safe configuration with Pydantic validation
-- Thread-safe configuration access
-- Automatic configuration file creation and validation
-
-## Component Relationships
-```
-app.py (Entry Point)
-    ↓
-Config System → DI Container
-    ↓
-DB Manager → Message Queue
-    ↓
-Channel Manager → Agent System
-    ↓
-UI Components ↔ Message Handlers
-```
-
-## Data Flow
-1. **Incoming Messages**: WebSocket → Channel → Message Queue → Handlers
-2. **AI Processing**: Handler → Agent → Tools → Knowledge Base → Response
-3. **Outgoing Messages**: Response → Channel → Platform API/WebSocket
+- **DI 容器**：自研轻量级 DIContainer，支持 SINGLETON / TRANSIENT / SCOPED 三种生命周期
+- **处理器链（Chain of Responsibility）**：消息处理通过 handlers 链路依次传递
+- **代理模式**：_DIProxy 实现懒加载向后兼容代理
+- **模块级单例**：部分服务（queue_manager 等）直接在模块中定义单例，无需 DI 注册
+- **桥接模式**：bridge 层将 Channel 与 Message 处理解耦
+- **自研 Agent 循环**：LLM 调用 → 工具执行 → 结果反馈 → 继续调用，直到无工具调用为止

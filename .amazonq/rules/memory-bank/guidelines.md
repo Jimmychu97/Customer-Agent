@@ -1,345 +1,247 @@
-# Development Guidelines and Patterns
+# Development Guidelines
 
 ## Code Quality Standards
 
-### 1. Python Version and Type Hints
-- **Python 3.11+** required throughout the codebase
-- **Type hints** extensively used for function parameters and return values
-- **Pydantic models** for configuration validation and data structures
-- **Enums** used for fixed value sets (ServiceLifetime, ModelType)
+### Module-Level Docstrings
+Every module starts with a triple-quoted docstring explaining its purpose. Multi-line docstrings describe responsibilities, key design decisions, and module context.
 
-### 2. Logging Standards
-- **Loguru** used consistently across all modules
-- Structured logging with context binding
-- Logger naming convention: `get_logger(__name__)` or `get_logger("ModuleName")`
-- Log levels: DEBUG, INFO, WARNING, ERROR
-- Business logging with specific event types (message_processed, agent_response, business_error, performance_metric)
+```python
+"""
+自定义 CustomerAgent 实现
 
-### 3. Error Handling
-- Custom exception hierarchy (ConfigError with subclasses)
-- Context manager for atomic operations
-- Exception handling in all async operations
-- Error logging with stack traces in development mode
+完全自主实现，不依赖 Agno 框架。
 
-## Code Formatting Patterns
+本模块已重构，职责分离为：
+- agent_config.py: 配置管理
+- llm_client.py: LLM 客户端封装
+"""
+```
 
-### 1. Module Organization
-- All modules use `__init__.py` files for clean exports
-- Consistent use of `__all__` lists for public API definition
-- Docstrings in triple quotes with proper formatting
-- Import organization: standard library → third-party → local modules
+### Logging Pattern
+Always use `get_logger` from `utils.logger_loguru`, never use Python's standard `logging` module directly.
 
-### 2. Class and Method Conventions
-- **Abstract base classes** (ABC) for defining interfaces
-- **Property decorators** for computed attributes
-- **Classmethod and staticmethod** used appropriately
-- **Async methods** prefixed with `async_` or use `await`
-- **Private methods** prefixed with underscore `_`
+```python
+from utils.logger_loguru import get_logger
+logger = get_logger("ModuleName")  # module-level logger, string name = logical component name
+```
 
-### 3. Naming Conventions
-- **snake_case** for variables, functions, and methods
-- **PascalCase** for classes and exceptions
-- **UPPER_SNAKE_CASE** for constants
-- **Descriptive names** that indicate purpose and type
+- Module-level logger instantiation (not per-method)
+- Log messages in Chinese
+- Use structured log levels: `logger.info(...)`, `logger.error(...)`, `logger.warning(...)`, `logger.debug(...)`
+- Never log sensitive user content verbatim; truncate or mask
+
+### Exception Handling
+All public methods must catch exceptions, log with context, and return a meaningful fallback:
+
+```python
+try:
+    result = some_operation()
+    return result
+except SomeSpecificError as e:
+    logger.error(f"操作失败: {e}, context={context_info}")
+    return fallback_value
+except Exception as e:
+    logger.error(f"意外异常: {e}")
+    return error_string_or_none
+```
+
+Tools must return `str` error messages (never raise) so the LLM can read the failure reason.
+
+---
 
 ## Structural Conventions
 
-### 1. Dependency Injection Pattern
-- Central DI container (`core/di_container.py`) manages all service lifecycles
-- Three service lifetimes: SINGLETON, TRANSIENT, SCOPED
-- Service registration via `configure_standard_services()`
-- Lazy loading to prevent circular dependencies
+### Service Base Classes
+All services inherit from one of these base classes in `core/base_service.py`:
 
-**Example DI Usage:**
+| Base Class | Use When |
+|---|---|
+| `BaseService` | Any service with initialize/dispose lifecycle |
+| `ConfigurableService` | Service that reads from config |
+| `AsyncService` | Service with async initialize/dispose |
+| `HealthCheckable` | Service needing health check endpoint |
+
+Services always set `self.logger = get_logger(self.__class__.__name__)` (inherited automatically from `BaseService`).
+
+### Handler Pattern (Chain of Responsibility)
+Message handlers extend `BaseHandler` → `MessageHandler`:
+
+```python
+class MyHandler(BaseHandler):
+    def can_handle(self, context: Context) -> bool:
+        return context.type in self.supported_types
+
+    async def handle(self, context: Context, metadata: Dict[str, Any]) -> bool:
+        try:
+            # ... process
+            return True
+        except Exception as e:
+            self.logger.error(f"处理失败: {e}")
+            return False  # or True to stop chain propagation
+```
+
+### Agent Tool Pattern
+Tools use `@agent_tool` decorator with a `Pydantic BaseModel` for parameters. This is the ONLY supported way to register tools.
+
+```python
+from pydantic import BaseModel, Field
+from Agent.CustomerAgent.custom.tool_decorator import agent_tool
+
+class MyToolParams(BaseModel):
+    shop_id: Optional[str] = Field(default=None, description="店铺ID")
+    query: str = Field(description="查询内容")
+
+@agent_tool(
+    name="my_tool_name",
+    description="工具描述（传给LLM，使用中文描述）",
+    param_model=MyToolParams,
+)
+def my_tool(params: MyToolParams) -> str:
+    # Always return str; return error message string on failure
+    try:
+        ...
+        return "结果字符串"
+    except Exception as e:
+        logger.error(f"工具执行异常: {e}")
+        return f"工具执行失败: {e}"
+```
+
+Tool registration is triggered by importing the tool module — use `# noqa: F401` comments to mark intentional side-effect imports.
+
+### DI Container Usage
+Services managed by DI container (`ConnectionStatusManager`, `DatabaseManager`, `KnowledgeService`) must be accessed via container:
+
 ```python
 from core.di_container import container
+from database.db_manager import DatabaseManager
 
-# Service registration
-container.register_singleton(DatabaseManager, factory=lambda: DatabaseManager())
-
-# Service retrieval
-db_manager = container.get(DatabaseManager)
+db = container.get(DatabaseManager)
 ```
 
-### 2. Base Service Pattern
-- **BaseService** abstract class provides common functionality
-- **initialize()** and **dispose()** methods required
-- **ConfigurableService** for configuration-driven services
-- **AsyncService** for asynchronous operations
-- **HealthCheckable** for services supporting health monitoring
+For backward-compatible module-level access, use the `_DIProxy` pattern (see `database/__init__.py`):
 
-**Example Base Service:**
 ```python
-class CustomService(BaseService):
-    def __init__(self, logger=None):
-        super().__init__(logger)
-        
-    def initialize(self) -> bool:
-        self._initialized = True
-        return True
-        
-    def dispose(self):
-        self._disposed = True
+# In module __init__.py
+from core.service_providers import _create_proxy
+db_manager = _create_proxy(DatabaseManager)  # proxy supports from database import db_manager
 ```
 
-### 3. Message Queue Pattern
-- **SimpleMessageQueue** for FIFO message processing
-- **QueueManager** for centralized queue management
-- **MessageWrapper** with unique message IDs
-- **QueueStats** for monitoring and metrics
+Do NOT create new singleton instances directly in business code. Register in `configure_standard_services()` in `core/di_container.py`.
 
-### 4. Configuration Management
-- **Config** class with thread-safe operations
-- **Pydantic models** for type-safe configuration
-- **Dot notation** for nested configuration access
-- **Atomic updates** with context manager
-- **Automatic validation** on load and save
+### Configuration Access
+Always use `config.get("section.key", default)` with dot-notation. Never access `config._config` directly.
 
-**Example Configuration Access:**
 ```python
 from config import config
-
-# Get nested configuration
-api_key = config.get("llm.api_key")
-business_start = config.get("business_hours.start")
+api_key = config.get("llm.api_key", "")
 ```
 
-## Textual Standards
+Use `config.get_model()` when you need typed access via `ConfigModel`.
 
-### 1. Documentation
-- **Module-level docstrings** with purpose and usage
-- **Class docstrings** with attributes and methods
-- **Function docstrings** with parameters and returns
-- **Chinese documentation** for business logic
-- **English identifiers** for code elements
+---
 
-### 2. String Formatting
-- **f-strings** preferred for string interpolation
-- **UTF-8 encoding** for all text files
-- **Consistent quotes**: double quotes for docstrings, single quotes for strings
-- **Multiline strings** with triple quotes
+## Naming Conventions
 
-### 3. Comment Guidelines
-- **TODO comments** for pending work
-- **FIXME comments** for known issues
-- **NOQA comments** for intentional linter violations
-- **Type hint comments** when type hints are insufficient
+| Pattern | Convention | Example |
+|---|---|---|
+| Classes | PascalCase | `CustomerAgent`, `BaseHandler` |
+| Functions/methods | snake_case | `get_product_list`, `async_reply` |
+| Module-level singletons | snake_case | `db_manager`, `queue_manager` |
+| Private methods | `_` prefix | `_run_agent_loop`, `_get_user_info` |
+| Tool param models | `{ToolName}Params` | `GetShopProductsParams` |
+| Logger variable | always `logger` | `logger = get_logger("Name")` |
+| Constants | UPPER_SNAKE | `DEFAULT_MAX_LOOPS`, `TOOL_REGISTRY` |
 
-## Practices Followed Throughout Codebase
+---
 
-### 1. Asynchronous Programming
-- **async/await** pattern for I/O operations
-- **asyncio.Queue** for message processing
-- **Async context managers** for resource management
-- **Error handling** in async operations
+## Semantic Patterns
 
-### 2. Thread Safety
-- **threading.RLock** for reentrant locking
-- **Thread-safe singletons** via DI container
-- **Atomic file operations** with temp files
-- **Double-checked locking** in DI container
+### Lazy / Deferred Initialization
+Components use `_is_initialized` flag + `initialize_async()` to defer heavy initialization until first use:
 
-### 3. Resource Management
-- **Context managers** for file and network resources
-- **Connection pooling** for database access
-- **Automatic cleanup** in service disposal
-- **Memory management** with deduplication caches
-
-### 4. Testing and Validation
-- **Configuration validation** on load
-- **Input validation** in API methods
-- **Error boundary** around external calls
-- **Performance metrics** collection
-
-## Semantic Patterns Overview
-
-### 1. Recurring Implementation Patterns
-
-**Factory Pattern:**
 ```python
-# Used in DI container for service creation
-factory=lambda: DatabaseManager(db_path=db_path)
+async def async_reply(self, query: str, context: Context) -> Reply:
+    if not self._is_initialized:
+        if not await self.initialize_async():
+            return Reply(ReplyType.TEXT, "初始化失败")
+    ...
 ```
 
-**Builder Pattern:**
+### Lazy Imports to Break Circular Dependencies
+Use local imports inside functions/methods to break circular dependency chains:
+
 ```python
-# Used in message context creation
-context = Context(content=message, from_user=user_id, ...)
+async def _send_reply(self, ...):
+    from Channel.pinduoduo.utils.API.send_message import SendMessage  # lazy import
+    sender = SendMessage(shop_id, user_id)
 ```
 
-**Observer Pattern:**
+### __init__.py as Public API
+Each package's `__init__.py` explicitly defines its public API via `__all__` and re-exports from submodules:
+
 ```python
-# Used in UI logging with signals
-log_received = pyqtSignal(str, str, object)
+# Message/handlers/__init__.py
+from .base import BaseHandler
+from .ai_handler import AIReplyHandler
+__all__ = ['BaseHandler', 'AIReplyHandler', 'MessagePreprocessor']
 ```
 
-**Strategy Pattern:**
+Keep `__init__.py` files minimal — only re-exports, no business logic.
+
+### Pydantic for All Data Models
+Use `Pydantic BaseModel` (v2 style) for:
+- Config models (`config.py`)
+- Bridge context/reply (`bridge/context.py`, `bridge/reply.py`)
+- Tool parameters (every `@agent_tool` param_model)
+- API response models
+
+Use `ConfigDict(arbitrary_types_allowed=True)` when models contain non-standard types.
+
+### Enum-Based Type Safety
+Use `str, Enum` subclass pattern for type-safe constants shared across modules:
+
 ```python
-# Used in message handlers
-class BaseHandler(ABC):
-    @abstractmethod
-    async def handle(self, context: Context) -> Optional[Reply]:
-        pass
+class ContextType(str, Enum):
+    TEXT = "text"
+    IMAGE = "image"
+
+    def __str__(self):
+        return self.value
 ```
 
-### 2. Common Architectural Approaches
+This allows `context.type == "text"` comparisons AND provides enum safety.
 
-**Layered Architecture:**
-1. UI Layer (PyQt6 widgets and windows)
-2. Service Layer (DI-managed business services)
-3. Data Layer (SQLAlchemy models and repositories)
-4. Integration Layer (Channel APIs and WebSocket)
+### Async/Sync Bridge for Qt
+Qt UI runs on main thread; asyncio runs in a separate thread. Use `utils/async_helper.py` for crossing the boundary. Never call `asyncio.run()` inside an existing event loop — detect the situation:
 
-**Event-Driven Architecture:**
-- Message queue for event distribution
-- Handler chain for event processing
-- Async consumers for event handling
-
-**Plugin Architecture:**
-- Channel plugins for different platforms
-- Tool plugins for AI agent capabilities
-- Handler plugins for message processing
-
-### 3. Design Patterns in Use
-
-**Singleton Pattern:**
-- DI container manages singleton instances
-- Module-level instances for global services
-- Thread-safe singleton implementation
-
-**Decorator Pattern:**
-- @injectable decorator for DI registration
-- Tool decorators for AI agent functions
-- Logging decorators for method tracing
-
-**Adapter Pattern:**
-- Channel adapters for platform APIs
-- Logger adapters for different logging systems
-- Configuration adapters for different formats
-
-### 4. Proper Internal API Usage
-
-**DI Container API:**
-```python
-# Service registration
-container.register_singleton(ServiceClass, factory=...)
-
-# Service retrieval
-service = container.get(ServiceClass)
-
-# Async service retrieval
-service = await container.get_async(ServiceClass)
-```
-
-**Configuration API:**
-```python
-# Get configuration
-value = config.get("section.key", default_value)
-
-# Set configuration
-config.set("section.key", value, save=True)
-
-# Atomic update
-with config.atomic_update():
-    config.set("key1", value1)
-    config.set("key2", value2)
-```
-
-**Logging API:**
-```python
-# Get logger
-logger = get_logger(__name__)
-
-# Structured logging
-logger.info("Message", extra={"event_type": "operation", "details": {...}})
-
-# Business logging
-business_logger = get_business_logger("ModuleName")
-business_logger.log_message_process(user_id, message_type, processing_time)
-```
-
-### 5. Frequently Used Code Idioms
-
-**Async Context Manager:**
-```python
-async with resource_manager() as resource:
-    result = await resource.process()
-```
-
-**Error Boundary:**
 ```python
 try:
-    result = await risky_operation()
-except Exception as e:
-    logger.error(f"Operation failed: {e}", exc_info=True)
-    return fallback_value
+    response = asyncio.run(self._llm_client.chat(...))
+except RuntimeError:
+    return "[降级处理]"  # already inside event loop
 ```
 
-**Configuration Validation:**
-```python
-@field_validator('start', 'end')
-@classmethod
-def validate_time_format(cls, v: str) -> str:
-    try:
-        datetime.strptime(v, '%H:%M')
-        return v
-    except ValueError:
-        raise ValueError('时间格式必须为HH:MM，例如08:00')
-```
+### Thread Safety
+- Config uses `threading.RLock()` for all read/write operations
+- DI container uses `threading.RLock()` with double-checked locking for singleton creation
+- Module-level singletons are safe to import from multiple threads after initialization
 
-### 6. Popular Annotations and Type Hints
+---
 
-**Type Hints:**
-```python
-from typing import Optional, Dict, List, Any, Union, Callable
+## API Integration Conventions (Pinduoduo)
 
-def process_message(
-    content: str,
-    metadata: Dict[str, Any],
-    callback: Optional[Callable[[str], None]] = None
-) -> Union[str, None]:
-    """Process message with typed parameters."""
-```
+Before implementing any new PDD API call:
+1. Test with curl/Python script to confirm real request params, headers, response structure
+2. Field names are **camelCase** in API responses (e.g., `goodsId`, not `goods_id`)
+3. Price values are in **fen (分)** → divide by 100 to get **yuan (元)**
+4. Parse from confirmed field paths — do not guess field names
 
-**Pydantic Models:**
-```python
-class ConfigModel(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    business_hours: BusinessHoursConfig = Field(
-        default_factory=BusinessHoursConfig,
-        description="营业时间配置"
-    )
-```
+---
 
-**Async Types:**
-```python
-async def process_async(queue: asyncio.Queue) -> List[MessageWrapper]:
-    """Process messages asynchronously."""
-```
+## File & Import Conventions
 
-## Development Workflow Practices
-
-### 1. Before Modifying APIs
-1. **Test with curl or Python scripts** to verify actual request parameters
-2. **Update parsing code based on real response structures** not assumptions
-3. **Validate with mock data or real calls** before deployment
-
-### 2. Code Organization
-- **Namespace packages** for major modules (Agent, Channel, Message)
-- **Clear separation of concerns** between layers
-- **Dependency direction**: higher layers depend on lower layers
-- **Circular dependency prevention** via DI and lazy imports
-
-### 3. Testing Approach
-- **Integration testing** for platform APIs
-- **Unit testing** for business logic
-- **Configuration testing** for validation rules
-- **Performance testing** for high-concurrency scenarios
-
-### 4. Deployment Considerations
-- **Windows executable** packaging support
-- **Configuration migration** between versions
-- **Database schema evolution** handling
-- **Log rotation and management**
-
-These guidelines represent the established patterns and best practices observed throughout the codebase, ensuring consistency and maintainability across all development efforts.
+- Each functional area has its own `__init__.py` exporting public symbols
+- Avoid wildcard imports (`from module import *`)
+- Tool modules are imported in `customer_agent.py` with `# noqa: F401` to trigger `@agent_tool` registration
+- `from __future__ import annotations` used in modules with forward references
+- Scripts in `scripts/` are standalone and not imported by application code

@@ -360,7 +360,7 @@ def configure_standard_services(config_instance: Any = None) -> 'DIContainer':
     if not container.is_registered(DatabaseManager):
         db_path = "./temp/channel_shop.db"
         if config_instance is not None:
-            db_path = config_instance.get("db_path", db_path)
+            db_path = config_instance.get("db_path", db_path) or db_path
         container.register_singleton(
             DatabaseManager,
             factory=lambda: DatabaseManager(db_path=db_path)
