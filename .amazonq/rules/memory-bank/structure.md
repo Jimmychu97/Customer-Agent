@@ -4,22 +4,23 @@
 
 ```
 Customer-Agent/
-├── app.py                      # Application entry point, global initialization order
-├── config.py                   # Thread-safe config manager (Pydantic models + JSON file)
-├── pyproject.toml              # uv/hatchling project definition
+├── app.py                  # Application entry point; controls global singleton init order
+├── config.py               # Thread-safe config manager (Pydantic-validated, JSON-backed)
+├── config.json             # Runtime config file (auto-generated on first run)
+├── pyproject.toml          # uv/hatchling project metadata and dependencies
 │
-├── Agent/                      # AI Agent module
+├── Agent/                  # AI agent module
+│   ├── bot.py              # Abstract Bot base class (reply / async_reply interface)
 │   └── CustomerAgent/
-│       ├── bot.py              # High-level bot interface
-│       ├── custom/             # Custom Agent framework internals
-│       │   ├── customer_agent.py   # Main agent orchestrator (tool loop)
-│       │   ├── agent_config.py     # Agent configuration
+│       ├── custom/         # Core agent engine
+│       │   ├── customer_agent.py   # Main agent: multi-turn tool calling loop
 │       │   ├── llm_client.py       # OpenAI-compatible LLM client
-│       │   ├── message_builder.py  # Prompt/message construction
-│       │   ├── session_manager.py  # Per-conversation session context
+│       │   ├── session_manager.py  # Per-user conversation history
+│       │   ├── tool_executor.py    # Tool dispatch and execution
 │       │   ├── tool_decorator.py   # @tool decorator for registering tools
-│       │   └── tool_executor.py    # Tool dispatch and execution
-│       └── tools/              # Agent tool implementations
+│       │   ├── message_builder.py  # LLM message construction
+│       │   └── agent_config.py     # Agent configuration
+│       └── tools/          # Agent tool implementations
 │           ├── search_customer_service_knowledge.py
 │           ├── get_product_knowledge.py
 │           ├── get_product_list.py
@@ -30,129 +31,136 @@ Customer-Agent/
 │           ├── get_voucher_code.py
 │           └── coupon_query.py
 │
-├── Channel/                    # Platform channel integrations
-│   ├── channel.py              # Abstract channel base class
+├── bridge/                 # Channel-agnostic message abstraction layer
+│   ├── context.py          # Context, ContextType, ChannelType, PinduoduoKwargs (Pydantic)
+│   └── reply.py            # Reply, ReplyType enums
+│
+├── Channel/                # Channel integrations
 │   └── pinduoduo/
-│       ├── pdd_channel.py      # Main PDD channel (entry per account)
-│       ├── pdd_login.py        # Playwright-based automated login
-│       ├── pdd_message.py      # Message data models
-│       ├── cookie_cache.py     # Cookie persistence
-│       ├── cookie_utils.py     # Cookie helpers
-│       ├── core/               # WebSocket lifecycle
-│       │   ├── pdd_connection.py     # WebSocket connection management
-│       │   ├── pdd_lifecycle.py      # Connect/disconnect/reconnect logic
-│       │   ├── pdd_message_handler.py # Incoming message parsing
-│       │   ├── pdd_config.py         # Channel configuration
-│       │   ├── pdd_status.py         # Connection state enum
-│       │   └── pdd_utils.py          # Utility helpers
-│       └── utils/API/          # Pinduoduo API wrappers
+│       ├── channel.py      # Abstract Channel base class
+│       ├── pdd_channel.py  # PDDChannel: WebSocket lifecycle + message dispatch
+│       ├── pdd_login.py    # Playwright-based automated login and cookie management
+│       ├── cookie_cache.py / cookie_utils.py
+│       ├── pdd_message.py  # PDD message type parsing
+│       ├── core/           # Low-level connection components
+│       │   ├── pdd_connection.py   # WebSocket connect/reconnect
+│       │   ├── pdd_lifecycle.py    # Start/stop lifecycle
+│       │   ├── pdd_message_handler.py  # Raw message → Context conversion
+│       │   ├── pdd_config.py       # PDD-specific config
+│       │   ├── pdd_status.py       # Connection status
+│       │   └── pdd_utils.py        # Utilities
+│       └── utils/
+│           ├── base_request.py     # HTTP request helper (cookie-based auth)
+│           └── API/                # Pinduoduo API endpoint wrappers
 │
-├── Message/                    # Message processing pipeline
-│   ├── message.py              # Message model
+├── Message/                # Message processing pipeline
+│   ├── message.py          # Message model
 │   ├── core/
-│   │   ├── queue.py            # Async message queue (module-level singleton)
-│   │   ├── consumer.py         # Message consumer manager
-│   │   └── handlers.py         # Handler chain execution
-│   ├── handlers/               # Concrete message handlers
-│   │   ├── base.py             # Abstract handler base class
-│   │   ├── preprocessor.py     # Message preprocessing
-│   │   ├── ai_handler.py       # AI reply handler
-│   │   ├── keyword_handler.py  # Keyword-triggered escalation
-│   │   └── voucher_handler.py  # GSX verification handler
+│   │   ├── queue.py        # SimpleMessageQueue + QueueManager (module-level singleton)
+│   │   ├── consumer.py     # MessageConsumer + MessageConsumerManager (module-level singleton)
+│   │   └── handlers.py     # MessageHandler abstract base
+│   ├── handlers/           # Concrete handler implementations
+│   │   ├── base.py         # BaseHandler
+│   │   ├── preprocessor.py # Pre-processing (business hours check, type filtering)
+│   │   ├── ai_handler.py   # AI agent invocation
+│   │   ├── keyword_handler.py  # Keyword matching → human escalation
+│   │   └── voucher_handler.py  # Voucher redemption + GSX report
 │   └── models/
-│       └── queue_models.py     # Queue item models
+│       └── queue_models.py # MessageWrapper, QueueStats, QueueConfig (Pydantic)
 │
-├── bridge/                     # Channel ↔ Message pipeline bridge
-│   ├── context.py              # Shared context between channel and handlers
-│   └── reply.py                # Reply dispatch back to channel
+├── core/                   # Core infrastructure
+│   ├── di_container.py     # DIContainer with SINGLETON/TRANSIENT/SCOPED lifetimes
+│   ├── service_providers.py # _DIProxy: zero-migration lazy proxy to DI container
+│   ├── connection_status.py # ConnectionStatusManager (shared across PDD channel instances)
+│   ├── base_service.py     # BaseService abstract class
+│   ├── cache.py            # CacheManager (module-level singleton)
+│   └── service_providers.py
 │
-├── core/                       # Core infrastructure
-│   ├── di_container.py         # DI container (SINGLETON/TRANSIENT/SCOPED)
-│   ├── service_providers.py    # Lazy _DIProxy for backward-compatible access
-│   ├── base_service.py         # Base class for services
-│   ├── cache.py                # Module-level cache manager singleton
-│   ├── connection_status.py    # ConnectionStatusManager (cross-channel shared)
-│   └── __init__.py
+├── database/               # Data layer
+│   ├── db_manager.py       # DatabaseManager: SQLAlchemy session factory
+│   ├── models.py           # SQLAlchemy ORM models
+│   ├── knowledge_service.py # KnowledgeService: jieba-indexed CS + product knowledge
+│   ├── product_sync.py     # PDD product sync + multimodal LLM knowledge extraction
+│   └── connection_pool.py  # Connection pool configuration
 │
-├── database/                   # Data persistence layer
-│   ├── db_manager.py           # SQLAlchemy session factory + CRUD
-│   ├── models.py               # ORM models (channels, products, knowledge, keywords)
-│   ├── knowledge_service.py    # Knowledge base search (jieba + embedding)
-│   ├── product_sync.py         # PDD API → DB product sync
-│   └── connection_pool.py      # DB connection pool config
+├── ui/                     # PyQt6 UI layer
+│   ├── main_ui.py          # MainWindow: navigation shell
+│   ├── auto_reply_ui.py    # Auto-reply main page
+│   ├── auto_reply/         # Auto-reply sub-components
+│   │   ├── card.py         # Account card widget
+│   │   ├── manager.py      # AutoReply manager
+│   │   ├── threads.py      # AutoReplyThread (QThread wrapping asyncio loop)
+│   │   └── ui.py
+│   ├── goods_ui.py         # Product management
+│   ├── Knowledge_ui.py     # Knowledge base management
+│   ├── keyword_ui.py       # Keyword management
+│   ├── setting_ui.py       # Settings (LLM, GSX, prompt)
+│   ├── user_ui.py          # Account management + Playwright login
+│   ├── voucher_ui.py       # Voucher management
+│   └── log_ui.py           # Log viewer
 │
-├── ui/                         # PyQt6 user interface
-│   ├── main_ui.py              # Main window / navigation
-│   ├── auto_reply_ui.py        # Auto-reply page
-│   ├── auto_reply/             # Auto-reply sub-components
-│   │   ├── ui.py, card.py, manager.py, threads.py
-│   ├── goods_ui.py             # Product management
-│   ├── Knowledge_ui.py         # Knowledge base management
-│   ├── keyword_ui.py           # Keyword management
-│   ├── user_ui.py              # Account management
-│   ├── setting_ui.py           # Settings
-│   ├── log_ui.py               # Log viewer
-│   └── voucher_ui.py           # Voucher/verification page
+├── utils/                  # Shared utilities
+│   ├── logger_loguru.py    # get_logger() factory (Loguru-based)
+│   ├── logger_config.py    # Log rotation / sink configuration
+│   ├── logging_context.py  # Structured logging context helpers
+│   ├── async_helper.py     # asyncio helpers (run in thread, etc.)
+│   ├── path_utils.py       # Path resolution utilities
+│   ├── runtime_path.py     # PyInstaller-aware path resolution
+│   ├── encoding_helper.py  # Encoding utilities
+│   ├── file_validator.py   # File type validation
+│   ├── resource_manager.py # Resource file management
+│   └── volcengine_models.py # Volcengine model helpers
 │
-├── utils/                      # Shared utilities
-│   ├── logger_loguru.py        # Loguru-based logger factory
-│   ├── logger_config.py        # Logger configuration
-│   ├── logging_context.py      # Contextual logging helpers
-│   ├── async_helper.py         # asyncio bridge helpers
-│   ├── path_utils.py           # Path resolution
-│   ├── runtime_path.py         # PyInstaller-aware path resolution
-│   ├── resource_manager.py     # Resource lifecycle management
-│   ├── file_validator.py       # File type/size validation
-│   ├── encoding_helper.py      # Text encoding utilities
-│   └── volcengine_models.py    # Volcengine model helpers
+├── scripts/                # Build and utility scripts
+│   ├── build_win_exe.py    # PyInstaller packaging script
+│   ├── agent_customer.spec # PyInstaller spec file
+│   └── test_gsx.py / test_sku.py
 │
-└── scripts/                    # Build and test scripts
-    ├── build_win_exe.py        # PyInstaller build script
-    ├── agent_customer.spec     # PyInstaller spec
-    ├── test_gsx.py             # GSX API test
-    └── test_sku.py             # SKU sync test
+├── temp/                   # Runtime data
+│   └── channel_shop.db     # SQLite database (auto-created)
+├── logs/                   # Application logs
+└── user_data/              # Playwright browser profiles (per phone number)
 ```
 
-## Core Architectural Patterns
+## Core Components & Relationships
 
-### 1. Dependency Injection Container (`core/di_container.py`)
-- Custom DI container with SINGLETON, TRANSIENT, SCOPED lifetimes
-- Double-checked locking for thread-safe singleton creation
-- `configure_standard_services()` called once in `app.py` before any imports
-- `_DIProxy` in `service_providers.py` provides backward-compatible lazy access: `from database import db_manager`
-
-### 2. Message Pipeline
+### Initialization Flow (app.py)
 ```
-PDD WebSocket → PddChannel → bridge/context → MessageQueue
-                                                    ↓
-                                         Consumer → HandlerChain
-                                         [preprocessor → keyword → ai → voucher]
-                                                    ↓
-                                          bridge/reply → PDD API send
+config → DI container (configure_standard_services) → db_manager proxy
+→ MainWindow → AutoReplyThread (per account)
 ```
 
-### 3. AI Agent Tool Loop (`Agent/CustomerAgent/custom/`)
-- `CustomerAgent` orchestrates the LLM ↔ tool call loop
-- `SessionManager` maintains per-conversation message history
-- `ToolExecutor` dispatches tool calls to registered tool functions
-- Tools decorated with `@tool` decorator for auto-registration
+### Message Processing Flow
+```
+PDD WebSocket
+  → PDDChannel (pdd_message_handler: raw msg → Context)
+  → bridge bridge.context.Context
+  → SimpleMessageQueue (queue_manager)
+  → MessageConsumer (_consume_loop)
+  → Handler chain: PreprocessorHandler → KeywordHandler → AIHandler / VoucherHandler
+  → PDD API (send reply)
+```
 
-### 4. Module-Level Singletons
-Services not in DI container use module-level singleton pattern:
-- `Message/core/queue.py` → `queue_manager`
-- `Message/core/consumer.py` → `message_consumer_manager`
-- `core/cache.py` → `cache_manager`
+### AI Agent Flow
+```
+AIHandler → CustomerAgent.async_reply(query, context)
+  → SessionManager (load conversation history)
+  → LLMClient (OpenAI-compatible call)
+  → ToolExecutor (if tool_calls in response)
+    → Tool implementations (search_knowledge, get_product, send_goods_link, ...)
+  → SessionManager (save updated history)
+  → Reply sent back through channel
+```
 
-### 5. Initialization Order (app.py)
-1. `config` (must be first)
-2. `db_manager` (DI proxy, lazy)
-3. `logger`
-4. `configure_standard_services(config)` — registers DI services
-5. UI (lazy, in `main()`)
+### Dependency Injection Pattern
+- `DIContainer` manages `ConnectionStatusManager`, `DatabaseManager`, `KnowledgeService` as singletons
+- `_DIProxy` in `service_providers.py` wraps DI container lookups → legacy `from database import db_manager` imports continue to work unchanged
+- Other singletons (`queue_manager`, `message_consumer_manager`) are module-level instances, imported directly
 
-## Component Relationships
-- `Channel` → `bridge` → `Message` (one-way pipeline flow)
-- `Message/handlers/ai_handler` → `Agent/CustomerAgent` → tools → `database`
-- `ui` → `core/di_container` to resolve services
-- All modules → `config` (global singleton, loaded first)
-- All modules → `utils/logger_loguru` for logging
+## Architectural Patterns
+
+- **Layered architecture**: Channel → Bridge → Message pipeline → Agent → Database
+- **Handler chain**: `MessageConsumer` iterates handlers; first `can_handle()` + successful `handle()` wins
+- **DI container + proxy**: Gradual migration path — new code uses `container.get()`, legacy code uses module-level proxies
+- **Asyncio + QThread**: Each `AutoReplyThread` runs its own `asyncio` event loop in a `QThread`; Qt UI stays on main thread
+- **Pydantic everywhere**: `Context`, `PinduoduoKwargs`, `ConfigModel`, `QueueConfig`, `MessageWrapper` all use Pydantic models for validation

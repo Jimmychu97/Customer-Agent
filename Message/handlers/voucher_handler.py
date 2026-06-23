@@ -9,6 +9,7 @@
   - 核销失败/异常 → 发失败回复，截断链
 """
 import re
+import json
 import asyncio
 from typing import Optional, Dict, Any, Tuple
 from bridge.context import Context, ContextType
@@ -291,7 +292,9 @@ class VoucherDetectionHandler(BaseHandler):
         status = _VOUCHER_SUCCESS if result_text and "核销成功" in result_text else _VOUCHER_FAILED
         if status == _VOUCHER_SUCCESS and gsx_params:
             goods_id, spec = gsx_params
-            await self._query_gsx_and_send(sn, goods_id, spec, order_id, shop_id, user_id, from_uid)
+            # GSX报告 → AI分析 → 核销成功 → 五星好评
+            await self._query_gsx_and_send(sn, goods_id, spec, order_id, shop_id, user_id, from_uid, result_text)
+            return None, status  # 核销成功时消息已在 _query_gsx_and_send 里全部发送
         return result_text, status
 
     def _query_and_verify(
@@ -343,10 +346,12 @@ class VoucherDetectionHandler(BaseHandler):
 
     async def _query_gsx_and_send(
         self, serial: str, goods_id: str, spec: str,
-        order_id: int, shop_id: str, user_id: str, from_uid: str
+        order_id: int, shop_id: str, user_id: str, from_uid: str,
+        voucher_success_text: str = ""
     ) -> None:
-        """异步调 GSX 查询，保存结果并发送给用户"""
-        import json
+        """异步调 GSX 查询，保存结果并发送给用户
+        发送顺序：GSX报告 → AI分析 → 核销成功 → 五星好评
+        """
         try:
             from database import db_manager
             from database.models import GoodsCommit, Order
@@ -382,48 +387,46 @@ class VoucherDetectionHandler(BaseHandler):
 
             gsx_text = _format_gsx_result(gsx_data)
             fixed = "亲，五行好平+关注+收藏+截图+文字好平赏个。以后有关于这部机器的验机问题，都可以随时联系美高技术员，技术员将为您解答！非常感谢您选择我们,祝你购机愉快~"
+            session_id = f"pinduoduo{from_uid}"
 
+            # 1. 发送 GSX 原始报告
             await self._send(shop_id, user_id, from_uid, gsx_text)
 
-            analysis = await self._llm_analyze_gsx(gsx_text)
+            # 2. 复用 CustomerAgent LLM 客户端生成分析，结果写入会话历史
+            analysis = await self._llm_analyze_gsx(gsx_text, session_id)
             if analysis:
                 await self._send(shop_id, user_id, from_uid, analysis)
 
-            await self._send(shop_id, user_id, from_uid, fixed)
+            # 3. 发送核销成功消息
+            if voucher_success_text:
+                await self._send(shop_id, user_id, from_uid, voucher_success_text)
 
-            try:
-                from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
-                from core.di_container import container
-                agent: CustomerAgent = container.get(CustomerAgent)
-                if agent._session_manager:
-                    session_id = f"pinduoduo{from_uid}"
-                    agent._session_manager.add_message(
-                        session_id=session_id,
-                        role="assistant",
-                        content=f"[已完成 GSX 验机查询，报告内容如下，如有问题可直接询问]\n{gsx_text}",
-                    )
-            except Exception as e:
-                self.logger.debug(f"GSX报告写入会话失败（不影响发送）: {e}")
+            # 4. 发送固定结语
+            await self._send(shop_id, user_id, from_uid, fixed)
 
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] GSX查询失败: {e}")
 
-    async def _llm_analyze_gsx(self, gsx_text: str) -> str:
-        """调用 LLM 对 GSX 报告进行详细中文分析"""
+    async def _llm_analyze_gsx(self, gsx_text: str, session_id: str) -> str:
+        """用独立 LLMClient 分析 GSX 报告，并将结果写入会话历史"""
         try:
-            from config import config
-            from openai import AsyncOpenAI
+            from Agent.CustomerAgent.custom.llm_client import LLMClient
+            from Agent.CustomerAgent.custom.agent_config import AgentConfig
+            from Agent.CustomerAgent.custom.session_manager import SessionManager
 
-            api_key = config.get("llm.api_key", "")
-            api_base = config.get("llm.api_base", "")
-            model_name = config.get("llm.model_name", "")
-
-            self.logger.info(f"[核销] GSX分析 api_key={'有' if api_key else '无'} model={model_name!r} base={api_base!r}")
-            if not api_key or not model_name:
-                self.logger.warning(f"[核销] LLM配置缺失，跳过GSX分析")
+            agent_config = AgentConfig.load_from_config()
+            if not agent_config.validate():
+                self.logger.warning("[核销] LLM 配置无效，跳过GSX分析")
                 return ""
 
-            client = AsyncOpenAI(api_key=api_key, base_url=api_base or None, timeout=30)
+            llm_client = LLMClient(
+                api_key=agent_config.api_key,
+                api_base=agent_config.api_base,
+                model_name=agent_config.model_name,
+                temperature=agent_config.temperature,
+            )
+            await llm_client.initialize()
+
             prompt = (
                 "你是一名专业的苹果手机验机顾问，请根据以下 GSX 验机报告，"
                 "用简单易懂的中文向买家详细解释每一项内容的含义，"
@@ -431,12 +434,33 @@ class VoucherDetectionHandler(BaseHandler):
                 "最后告知用户如有疑问可以继续询问。\n\n"
                 f"验机报告：\n{gsx_text}"
             )
-            resp = await client.chat.completions.create(
-                model=model_name,
+
+            response = await llm_client.chat(
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
+                tool_choice="none",
             )
-            return resp.choices[0].message.content.strip()
+            analysis = (response.content or "").strip()
+
+            # 把 GSX 报告和分析写入会话历史
+            session_content = f"[已完成 GSX 验机查询]\n验机报告：\n{gsx_text}"
+            if analysis:
+                self.logger.info(f"[核销] GSX分析完成，长度={len(analysis)}")
+                session_content += f"\n\n分析：\n{analysis}"
+
+            session_manager = SessionManager(
+                db_path=agent_config.db_path,
+                token_window=agent_config.token_window,
+                compress_ratio=agent_config.compress_ratio,
+                retain_count=agent_config.retain_count,
+                model_name=agent_config.model_name,
+            )
+            session_manager.add_message(
+                session_id=session_id,
+                role="assistant",
+                content=session_content,
+            )
+            return analysis
+
         except Exception as e:
             self.logger.opt(exception=True).warning(f"[核销] LLM 分析 GSX 报告失败: {e}")
             return ""

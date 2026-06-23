@@ -5,10 +5,11 @@
 
 from .base import BaseHandler
 from .ai_handler import AIReplyHandler
-from .preprocessor import MessagePreprocessor
+from .preprocessor import MessagePreprocessor, BusinessHoursHandler
 
 __all__ = [
     'BaseHandler',
     'AIReplyHandler',
-    'MessagePreprocessor'
+    'MessagePreprocessor',
+    'BusinessHoursHandler',
 ]

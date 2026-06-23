@@ -1,15 +1,34 @@
 """
-消息预处理器
-提取和优化消息预处理逻辑
+消息预处理器和AI回复开关处理器
 """
 
 import json
-from typing import Dict, Any, Union, Optional
+from typing import Dict, Any, Optional
 from utils.logger_loguru import get_logger
-from bridge.context import ContextType
+from bridge.context import Context, ContextType
 
 
 logger = get_logger(__name__)
+
+
+class BusinessHoursHandler:
+    """AI回复开关处理器——enabled=False 时截断所有消息"""
+
+    def can_handle(self, context: Context) -> bool:
+        return True
+
+    async def handle(self, context: Context, metadata: Dict[str, Any]) -> bool:
+        """True = 截断（AI已关闭）；False = 放行"""
+        try:
+            from config import config
+            enabled = config.get("business_hours.enabled", True)
+            if not enabled:
+                logger.debug("[AI回复] 已关闭，跳过消息")
+                return True  # 截断链，不回复
+            return False  # 已开启，放行
+        except Exception as e:
+            logger.error(f"[AI回复开关] 检查异常: {e}")
+            return False
 
 
 class MessagePreprocessor:
