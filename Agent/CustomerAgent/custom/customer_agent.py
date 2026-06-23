@@ -23,6 +23,10 @@ from Agent.CustomerAgent.tools import (
     get_product_list,                 # noqa: F401  — 注册 get_shop_products 工具
     get_product_knowledge,             # noqa: F401  — 注册 get_product_knowledge 工具
     search_customer_service_knowledge,  # noqa: F401  — 注册 search_customer_service_knowledge 工具
+    verify_voucher,                   # noqa: F401  — 注册 verify_voucher 工具
+    use_voucher,                      # noqa: F401  — 注册 use_voucher 工具
+    coupon_query,                     # noqa: F401  — 注册 get_coupon_list / get_voucher_stats 工具
+    get_voucher_code,                 # noqa: F401  — 注册 get_voucher_code 工具
 )
 from bridge.context import Context
 from bridge.reply import Reply, ReplyType

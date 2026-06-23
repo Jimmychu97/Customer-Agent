@@ -40,6 +40,7 @@ class MainWindow(FluentWindow):
         self.keyword_manager_view = None
         self.user_manager_view = None
         self.log_view = None
+        self.message_view = None
         self.voucher_view = None
         self.settingInterface = None
 
@@ -68,6 +69,9 @@ class MainWindow(FluentWindow):
         from ui.log_ui import LogUI
         self.logger.info(f"  import LogUI: {time.perf_counter()-t:.2f}s")
         t = time.perf_counter()
+        from ui.message_ui import MessageUI
+        self.logger.info(f"  import MessageUI: {time.perf_counter()-t:.2f}s")
+        t = time.perf_counter()
         from ui.setting_ui import SettingUI
         self.logger.info(f"  import SettingUI: {time.perf_counter()-t:.2f}s")
         t = time.perf_counter()
@@ -91,6 +95,9 @@ class MainWindow(FluentWindow):
         t = time.perf_counter()
         self.log_view = LogUI(self)
         self.logger.info(f"  LogUI: {time.perf_counter()-t:.2f}s")
+        t = time.perf_counter()
+        self.message_view = MessageUI(self)
+        self.logger.info(f"  MessageUI: {time.perf_counter()-t:.2f}s")
         t = time.perf_counter()
         self.knowledge_view = KnowledgeUI(self)
         self.logger.info(f"  KnowledgeUI: {time.perf_counter()-t:.2f}s")
@@ -129,6 +136,7 @@ class MainWindow(FluentWindow):
             position=NavigationItemPosition.BOTTOM
         )
         self.addSubInterface(self.log_view, FIF.HISTORY, '日志管理', NavigationItemPosition.BOTTOM)
+        self.addSubInterface(self.message_view, FIF.CHAT, '消息管理', NavigationItemPosition.BOTTOM)
         self.addSubInterface(self.settingInterface, FIF.SETTING, '设置', NavigationItemPosition.BOTTOM)
 
 

@@ -10,8 +10,7 @@ from qfluentwidgets import (CardWidget, SubtitleLabel, CaptionLabel, BodyLabel,
                            PrimaryPushButton, PushButton, StrongBodyLabel,
                            LineEdit, ComboBox, ScrollArea, FluentIcon as FIF,
                            InfoBar, InfoBarPosition, TextEdit, PasswordLineEdit,
-                           TimePicker)
-from PyQt6.QtCore import QTime
+                           SwitchButton)
 from utils.logger_loguru import get_logger
 from config import config, config_base
 
@@ -199,79 +198,41 @@ class PddOpenConfigCard(CardWidget):
 
 
 class BusinessHoursCard(CardWidget):
-    """业务时间配置卡片"""
+    """AI自动回复开关卡片"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setupUI()
 
     def setupUI(self):
-        """设置UI"""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(16)
+        layout.setSpacing(12)
 
-        # 卡片标题
-        title_label = StrongBodyLabel("业务时间设置")
+        title_label = StrongBodyLabel("AI自动回复")
         title_label.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
         layout.addWidget(title_label)
 
-        # 表单布局
-        form_layout = QFormLayout()
-        form_layout.setSpacing(12)
-        form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        form_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        form_layout.setFormAlignment(Qt.AlignmentFlag.AlignLeft)
+        switch_row = QHBoxLayout()
+        switch_row.setContentsMargins(0, 0, 0, 0)
+        switch_label = BodyLabel("启用AI自动回复")
+        self.enabled_switch = SwitchButton()
+        self.enabled_switch.setChecked(True)
+        switch_row.addWidget(switch_label)
+        switch_row.addStretch()
+        switch_row.addWidget(self.enabled_switch)
+        layout.addLayout(switch_row)
 
-        # 开始时间
-        self.start_time_picker = TimePicker()
-        self.start_time_picker.setTime(QTime(8, 0))  # 默认8:00
-        form_layout.addRow("开始时间:", self.start_time_picker)
-
-        # 结束时间
-        self.end_time_picker = TimePicker()
-        self.end_time_picker.setTime(QTime(23, 0))  # 默认23:00
-        form_layout.addRow("结束时间:", self.end_time_picker)
-
-        layout.addLayout(form_layout)
-
-        # 说明文本
-        description_label = CaptionLabel(
-            "设置AI客服的工作时间。在工作时间内，系统将自动响应客户消息。\n"
-            "在非工作时间，系统将不会自动回复。"
-        )
-        description_label.setStyleSheet("color: #666; padding: 8px 0;")
-        layout.addWidget(description_label)
+        desc = CaptionLabel("开启后 AI 将自动回复客户消息；关闭后所有消息不作任何处理。")
+        desc.setStyleSheet("color: #666;")
+        layout.addWidget(desc)
 
     def getConfig(self) -> dict:
-        """获取配置"""
-        return {
-            "businessHours": {
-                "start": self.start_time_picker.getTime().toString("HH:mm"),
-                "end": self.end_time_picker.getTime().toString("HH:mm")
-            },
-            "business_hours": {
-                "start": self.start_time_picker.getTime().toString("HH:mm"),
-                "end": self.end_time_picker.getTime().toString("HH:mm")
-            }
-        }
+        return {"business_hours": {"enabled": self.enabled_switch.isChecked()}}
 
     def setConfig(self, config: dict):
-        """设置配置"""
-        # 支持新旧配置格式
-        business_hours = config.get("businessHours", config.get("business_hours", {}))
-
-        # 解析开始时间
-        start_time_str = business_hours.get("start", "08:00")
-        start_time = QTime.fromString(start_time_str, "HH:mm")
-        if start_time.isValid():
-            self.start_time_picker.setTime(start_time)
-
-        # 解析结束时间
-        end_time_str = business_hours.get("end", "23:00")
-        end_time = QTime.fromString(end_time_str, "HH:mm")
-        if end_time.isValid():
-            self.end_time_picker.setTime(end_time)
+        business_hours = config.get("business_hours", {})
+        self.enabled_switch.setChecked(business_hours.get("enabled", True))
 
 
 class SettingUI(QFrame):
@@ -417,8 +378,7 @@ class SettingUI(QFrame):
                     "instructions": config.get("prompt.instructions", [])
                 },
                 "business_hours": {
-                    "start": config.get("business_hours.start", "08:00"),
-                    "end": config.get("business_hours.end", "23:00")
+                    "enabled": config.get("business_hours.enabled", True),
                 },
                 "pdd_open": {
                     "client_id": config.get("pdd_open.client_id", ""),
@@ -463,26 +423,23 @@ class SettingUI(QFrame):
             "prompt": config_data.get("prompt", {
                 "instructions": []
             }),
-            "business_hours": config_data.get("business_hours", {"start": "08:00", "end": "23:00"})
+            "business_hours": config_data.get("business_hours", {"enabled": True})
         }
 
         # 验证business_hours格式
         business_hours = validated_config["business_hours"]
         if not isinstance(business_hours, dict):
-            business_hours = {"start": "08:00", "end": "23:00"}
+            business_hours = {"enabled": True}
             validated_config["business_hours"] = business_hours
 
-        if "start" not in business_hours:
-            business_hours["start"] = "08:00"
-        if "end" not in business_hours:
-            business_hours["end"] = "23:00"
+        if "enabled" not in business_hours:
+            business_hours["enabled"] = True
 
         # 设置到界面
         self.llm_config_card.setConfig(validated_config["llm"])
         self.prompt_config_card.setConfig(validated_config["prompt"])
 
-        business_hours_config = validated_config["business_hours"]
-        self.business_hours_card.setConfig({"business_hours": business_hours_config})
+        self.business_hours_card.setConfig({"business_hours": validated_config["business_hours"]})
         self.pdd_open_config_card.setConfig(validated_config.get("pdd_open", {}))
 
     def onSaveConfig(self):
@@ -499,7 +456,7 @@ class SettingUI(QFrame):
             new_config = {
                 "llm": llm_config,
                 "prompt": prompt_config,
-                "business_hours": business_config.get("businessHours", {"start": "08:00", "end": "23:00"}),
+                "business_hours": business_config.get("business_hours", {"enabled": True}),
                 "pdd_open": pdd_open_config,
                 "db_path": config.get("db_path", "")
             }
@@ -510,14 +467,6 @@ class SettingUI(QFrame):
                 return
             if not llm_config.get("model_name"):
                 QMessageBox.warning(self, "配置错误", "请输入LLM模型名称！")
-                return
-
-            # 验证时间设置
-            start_time = self.business_hours_card.start_time_picker.getTime()
-            end_time = self.business_hours_card.end_time_picker.getTime()
-
-            if start_time >= end_time:
-                QMessageBox.warning(self, "时间设置错误", "开始时间必须早于结束时间！")
                 return
 
             # 使用config模块保存配置

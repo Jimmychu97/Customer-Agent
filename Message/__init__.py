@@ -15,7 +15,7 @@ from .models.queue_models import MessageWrapper, QueueStats
 # 处理器 - 新的模块化实现
 from .handlers.base import BaseHandler
 from .handlers.ai_handler import AIReplyHandler
-from .handlers.preprocessor import MessagePreprocessor
+from .handlers.preprocessor import MessagePreprocessor, BusinessHoursHandler
 
 # 管理器 - 直接使用核心队列管理器
 from .core.queue import QueueManager
@@ -129,10 +129,13 @@ def _get_keyword_handler():
 
 # 提供兼容的handler_chain函数实现
 def handler_chain(use_ai=True, businessHours=None, bot=None):
-    """简化版处理器链创建函数 - 包含关键词检测"""
+    """简化版处理器链创建函数 - 包含营业时间过滤和关键词检测"""
     handlers = []
 
-    # 1. 核销自动检测（最高优先级，苹果序列号+拼多多卡券号双条件匹配）
+    # 1. 营业时间过滤（最高优先级，非营业时间直接截断）
+    handlers.append(BusinessHoursHandler())
+
+    # 2. 核销自动检测（苹果序列号+拼多多卡券号双条件匹配）
     try:
         from .handlers.voucher_handler import VoucherDetectionHandler
         handlers.append(VoucherDetectionHandler())
@@ -140,16 +143,16 @@ def handler_chain(use_ai=True, businessHours=None, bot=None):
         from utils.logger_loguru import get_logger
         get_logger("handler_chain").warning(f"核销检测处理器加载失败: {e}")
 
-    # 2. 关键词检测（缓存实例避免重复 DB 查询）
+    # 3. 关键词检测（缓存实例避免重复 DB 查询）
     keyword_handler = _get_keyword_handler()
     if keyword_handler is not None:
         handlers.append(keyword_handler)
 
-    # 3. 如果启用AI，添加AI处理器
+    # 4. AI 处理器
     if use_ai:
         handlers.append(create_ai_handler(bot))
 
-    # 3. 最后添加兜底处理器
+    # 5. 兜底处理器
     handlers.append(CatchAllHandler())
 
     return handlers
@@ -185,6 +188,7 @@ __all__ = [
     'BaseHandler',
     'AIReplyHandler',
     'MessagePreprocessor',
+    'BusinessHoursHandler',
     'KeywordDetectionHandler',
 
     # 便捷函数

@@ -2,202 +2,273 @@
 
 ## Code Quality Standards
 
-### File Structure
-- Every module starts with a docstring explaining the module's purpose
-- Module-level logger is always created at the top: `logger = get_logger("ModuleName")`
-- Imports are grouped: stdlib → third-party → local (with lazy imports at function level to break circular deps)
-- Section dividers use `# ========== Section Name ==========` for logical grouping within long files
+### Module-level Docstrings
+Every module starts with a triple-quoted docstring describing its purpose, responsibilities, and key design notes. Keep it concise but informative:
+```python
+"""
+AI回复处理器
+专注的AI处理，移除复杂预处理和发送逻辑
+"""
+```
 
-### Naming Conventions
-- Classes: PascalCase (`KnowledgeService`, `LifecycleMixin`, `CustomerAgent`)
-- Methods and functions: snake_case
-- Constants: UPPER_SNAKE_CASE (`DEFAULT_TOKEN_WINDOW`, `TOOL_REGISTRY`, `ZIP_SIGNATURE`)
-- Connection keys: `f"{shop_id}_{user_id}"` string format, used consistently across all channel code
-- Loggers: named after their class/module in Chinese-friendly English (`"KnowledgeService"`, `"CustomerAgent"`)
+### Logger Initialization Pattern
+Always use `get_logger` from `utils.logger_loguru` at the module or class level. Never use `print()` for operational output:
+```python
+from utils.logger_loguru import get_logger
 
-### Type Annotations
-- All public methods use full type annotations
-- Return types always annotated, including `Optional[T]`, `List[T]`, `Dict[str, Any]`
-- `from __future__ import annotations` used in modules with forward references
+logger = get_logger("ModuleName")          # module-level
+self.logger = get_logger("ClassName")      # class-level (in __init__)
+```
 
-### Docstrings
-- Class docstrings describe responsibility and key behaviors
-- Method docstrings include `Args:` and `Returns:` sections for non-trivial methods
-- Inline comments use Chinese for business logic explanations
+### Exception Handling
+All public methods and async handlers must catch and log exceptions. Handlers return `False` (not raise) on failure so the consumer can try the next handler:
+```python
+try:
+    ...
+except Exception as e:
+    self.logger.error(f"操作失败: {e}")
+    return False
+```
+
+Use `self.logger.opt(exception=True).error(...)` when you need the full traceback:
+```python
+self.logger.opt(exception=True).error(f"[核销] GSX查询失败: {e}")
+```
 
 ---
 
-## Architectural Patterns
+## Structural Conventions
 
-### 1. Module-Level Logger
-Always get a per-module logger at import time:
-```python
-from utils.logger_loguru import get_logger
-logger = get_logger("ModuleName")
-```
-Never use `print()` in production code — use `logger.info/warning/error/debug`.
-
-### 2. DI Container Usage
-Services managed by DI container are accessed via type-based resolution:
-```python
-from core.di_container import container
-from database.knowledge_service import KnowledgeService
-knowledge_service = container.get(KnowledgeService)
-```
-Backward-compatible access via `_DIProxy` is also used:
-```python
-from database import db_manager  # proxy, resolves to DatabaseManager singleton
-db_manager.get_account(...)
-```
-
-### 3. Lazy Imports to Break Circular Dependencies
-Imports that would create circular deps go inside functions or at the bottom of the file:
-```python
-# At bottom of pdd_lifecycle.py
-from database import db_manager
-from core.connection_status import ConnectionState
-```
-Or inside methods:
-```python
-async def _cleanup_resources(self, queue_name: str):
-    from Message import message_consumer_manager  # lazy import
-```
-
-### 4. SQLAlchemy Session as Context Manager
-All database operations use `with self.get_session() as session:` pattern.
-Never store session objects across calls. Always commit before returning results,
-and re-query after commit to return a session-attached object:
-```python
-def add_or_update_product(self, ...) -> ProductKnowledge:
-    with self.get_session() as session:
-        # ... do work ...
-        session.commit()
-        # Re-query to return attached object
-        result = session.scalar(stmt)
-        return result
-```
-
-### 5. Agent Tool Registration via Decorator
-Tools are registered to `TOOL_REGISTRY` using `@agent_tool` decorator with a Pydantic param model:
-```python
-class SendGoodsParams(BaseModel):
-    recipient_uid: str = Field(description="接收消息的用户UID")
-    goods_id: int = Field(description="商品ID")
-
-@agent_tool(
-    name="send_goods_link",
-    description="向用户发送商品卡片链接",
-    param_model=SendGoodsParams,
-)
-def send_goods_link(params: SendGoodsParams) -> str:
-    ...
-```
-Tool modules are imported in `customer_agent.py` with `# noqa: F401` comments to trigger registration.
-
-### 6. Async Task Lifecycle Pattern
-Async background tasks (heartbeat, cookie health, reconnect) follow this pattern:
-- Store tasks in `dict[connection_key, Task]`
-- Cancel with `task.cancel()` + `await asyncio.wait_for(task, timeout=N)`
-- Catch `(asyncio.CancelledError, asyncio.TimeoutError, asyncio.InvalidStateError)` silently
-- Clean up dict entry in `finally` block of the task coroutine
-- Always check stop event: `while not (self._stop_event and self._stop_event.is_set())`
-
-### 7. Handler Chain Pattern
-Message handlers inherit from `BaseHandler(MessageHandler)` and implement:
-- `can_handle(context) -> bool` — filter check
-- `handle(context, metadata) -> bool` — process and return True if handled
+### Handler Pattern (Chain of Responsibility)
+All message handlers extend `BaseHandler` → `MessageHandler`. Implement exactly two methods:
 
 ```python
-class AIReplyHandler(BaseHandler):
+class MyHandler(BaseHandler):
     def can_handle(self, context: Context) -> bool:
-        return context.type in self.auto_reply_types
+        """Fast check — no side effects, no I/O"""
+        return context.type == ContextType.TEXT
 
     async def handle(self, context: Context, metadata: Dict[str, Any]) -> bool:
+        """Return True = handled (stops chain). Return False = pass to next handler."""
         ...
 ```
 
-### 8. Validation Result Object Pattern
-Validators return a `ValidationResult` dataclass instead of raising exceptions:
+`metadata` carries: `shop_id`, `user_id`, `from_uid`, `user_key`.
+
+### Tool Registration Pattern
+Tools use the `@agent_tool` decorator with a Pydantic `BaseModel` for parameters. Import the tool module in `customer_agent.py` to trigger registration:
+
 ```python
-@dataclass
-class ValidationResult:
-    is_valid: bool
-    error_type: Optional[str] = None
-    error_message: Optional[str] = None
-    suggestions: List[str] = None
-    file_info: Dict = None
+from pydantic import BaseModel, Field
+from Agent.CustomerAgent.custom.tool_decorator import agent_tool
+
+class MyToolParams(BaseModel):
+    shop_id: str = Field(description="店铺ID")
+    query: str = Field(description="搜索关键词")
+
+@agent_tool(
+    name="my_tool_name",
+    description="工具功能描述（会传给 LLM）",
+    param_model=MyToolParams,
+)
+def my_tool(params: MyToolParams) -> str:
+    ...
 ```
-Always check `result.is_valid` before proceeding. Validators use inheritance and call `super().validate_basic()` first.
 
-### 9. Config Access Pattern
-- Use `config.get("llm.api_key")` for dot-notation nested access
-- Use `config.get_model()` for Pydantic-validated `ConfigModel`
-- Use `config.set("key", value, save=True)` for immediate persistence
-- Use `with config.atomic_update():` for transactional multi-field updates
-- Config saves atomically via temp file + rename to prevent corruption
+Tool functions receive a single validated Pydantic model instance and return a string result.
 
-### 10. Error Handling
-- Service methods return `False` or `None` on failure, not exceptions (except for config errors)
-- Async loops catch `asyncio.CancelledError` separately to handle cancellation cleanly
-- LLM calls have fallback replies: if loop_count == 0, return error string; else return last assistant content
-- All `except Exception as e:` blocks log the error with `logger.error(f"...: {e}")`
+### DI Container Usage
+Register singletons in `core/di_container.py` → `configure_standard_services()`. Retrieve via `container.get(ServiceType)`:
+
+```python
+from core.di_container import container
+from database.db_manager import DatabaseManager
+
+db = container.get(DatabaseManager)
+```
+
+Legacy imports continue to work via `_DIProxy` — `from database import db_manager` still resolves through DI without modification.
+
+For new handlers that need a DI service but want a fallback:
+```python
+try:
+    from core.di_container import container
+    from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
+    bot = container.get(CustomerAgent)
+except Exception as e:
+    get_logger("Handler").warning(f"从DI容器获取失败: {e}, 将使用无Bot模式")
+```
+
+### Lazy Imports to Avoid Circular Dependencies
+Use deferred imports inside functions/methods instead of top-level imports when importing between major modules (Channel, Agent, Message, database):
+
+```python
+async def _send(self, ...):
+    from Channel.pinduoduo.utils.API.send_message import SendMessage  # lazy
+    sender = SendMessage(shop_id, user_id)
+```
+
+### Module `__init__.py` Exports
+Package `__init__.py` files should expose a clean public API using `__all__` and re-export the most commonly used names:
+
+```python
+from .base import BaseHandler
+from .ai_handler import AIReplyHandler
+
+__all__ = ['BaseHandler', 'AIReplyHandler']
+```
+
+---
+
+## Naming Conventions
+
+- Classes: `PascalCase` — `CustomerAgent`, `VoucherDetectionHandler`
+- Functions/methods: `snake_case` — `can_handle`, `async_reply`
+- Private helpers: `_snake_case` prefix — `_extract_imei`, `_do_verify`, `_send`
+- Constants: `UPPER_SNAKE_CASE` — `TOOL_REGISTRY`, `_VOUCHER_SUCCESS`
+- Logger names: match class or module name — `get_logger("VoucherDetectionHandler")`
+- Log prefixes for domain isolation: `[核销]`, `[GSX]`, `[AI]` — makes grep filtering easy
 
 ---
 
 ## Pydantic Usage
 
-- Config models use `ConfigDict(arbitrary_types_allowed=True)` when needed
-- Fields use `Field(default=..., description="...")` consistently
-- `@field_validator` with `@classmethod` for input validation
-- Tool param models use `Field(description=...)` — descriptions go to LLM
+Pydantic v2 is used throughout. Key patterns:
+
+```python
+from pydantic import BaseModel, Field, field_validator, ConfigDict
+
+class MyConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    name: str = Field(default="", description="描述")
+
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        ...
+```
+
+- Always add `description=` to `Field()` for tool parameter models (LLM uses these)
+- Use `Optional[str] = None` for nullable fields
+- Context, config models, queue models, and tool params all use Pydantic
 
 ---
 
-## Concurrency Patterns
+## Async Patterns
 
-- `asyncio.Semaphore` used for concurrent message processing limits (`message_semaphore`)
-- `asyncio.to_thread()` used to run blocking sync code in async context (e.g. cookie validation, re-login)
-- `threading.RLock()` used for thread-safe access to shared state in sync classes (config, DI container)
-- Double-checked locking for singleton creation in DI container
-- `asyncio.create_task()` + `task.add_done_callback(set.discard)` for fire-and-forget with tracking
+### Thread-blocking Operations
+Use `asyncio.to_thread()` for blocking I/O (HTTP API calls, DB operations in sync code):
+
+```python
+result = await asyncio.to_thread(self._query_and_verify, sn, coupon_no, ...)
+```
+
+### Database Access
+Always use the context manager `session_scope()` for database operations. Never hold sessions across awaits:
+
+```python
+from database import db_manager
+
+with db_manager.session_scope() as session:
+    order = session.query(Order).filter_by(id=order_id).first()
+    order.status = 1
+    session.flush()
+```
+
+### Semaphore for Concurrency
+Use `asyncio.Semaphore` in consumers to cap concurrent message processing:
+```python
+self.semaphore = asyncio.Semaphore(max_concurrent)
+async with self.semaphore:
+    await self._process_message(wrapper)
+```
+
+### Task Lifecycle Tracking
+Track tasks with a set and `done_callback` to enable graceful shutdown:
+```python
+task = asyncio.create_task(self._process(wrapper))
+self._tasks.add(task)
+task.add_done_callback(self._tasks.discard)
+```
 
 ---
 
-## Logging Conventions
+## Config Access
 
-- Use `logger.debug()` for per-message/per-loop trace info
-- Use `logger.info()` for lifecycle events (init success, connect, disconnect, data saved)
-- Use `logger.warning()` for recoverable issues (connection closed, cookie invalid, fallback used)
-- Use `logger.error()` for exceptions and failures
-- Log key identifiers in messages: `f"shop_id={shop_id}, goods_id={goods_id}"`
-- Use `log_with_ctx()` for cross-cutting logs that need shop/user context
+Use dot-notation via the global `config` instance:
+```python
+from config import config
+
+api_key = config.get("llm.api_key", "")
+config.set("llm.api_key", new_value, save=True)
+```
+
+For batch updates with rollback support:
+```python
+with config.atomic_update():
+    config.set("llm.api_key", key, save=False)
+    config.set("llm.model_name", model, save=False)
+# saves automatically on context exit
+```
 
 ---
 
-## UI Conventions (PyQt6)
+## Sending Replies
 
-- UI pages are separate files in `ui/` with one class per file
-- Complex pages have a sub-package (e.g., `ui/auto_reply/`)
-- Worker threads go in `threads.py` within the sub-package
-- DI container is accessed from UI to get services: `container.get(KnowledgeService)`
-- Never do blocking I/O on the Qt main thread — use QThread or asyncio bridge
+All handlers send replies via `SendMessage` from `Channel.pinduoduo.utils.API.send_message`. Always check the result:
+
+```python
+from Channel.pinduoduo.utils.API.send_message import SendMessage
+
+result = SendMessage(shop_id, user_id).send_text(from_uid, reply_text)
+success = isinstance(result, dict) and result.get("success", False)
+```
 
 ---
 
-## Adding New Features
+## Frequently Used Idioms
 
-### New Agent Tool
-1. Create `Agent/CustomerAgent/tools/my_tool.py`
-2. Define Pydantic params model and decorate function with `@agent_tool`
-3. Import the module in `customer_agent.py` with `# noqa: F401`
+### Extract user info from Context
+```python
+shop_id = metadata.get("shop_id")
+user_id = metadata.get("user_id")
+from_uid = metadata.get("from_uid")
 
-### New Message Handler
-1. Create `Message/handlers/my_handler.py` inheriting `BaseHandler`
-2. Implement `can_handle` and `handle`
-3. Register in handler chain in `Message/core/handlers.py`
+if not all([shop_id, user_id, from_uid]):
+    self.logger.warning("缺少必要参数")
+    return False
+```
 
-### New DB Service Method
-1. Add method to `KnowledgeService` or `DatabaseManager`
-2. Use `with self.get_session() as session:` 
-3. Use SQLAlchemy `select()` + `session.scalar()` / `session.scalars()`
-4. Log success/failure with `logger.info` / `logger.warning`
+### Session ID construction
+```python
+session_id = f"{context.channel_type.value}{context.kwargs.user_id}"
+# e.g. "pinduoduo123456789"
+```
+
+### Guard against double-initialization
+```python
+if self._is_initialized:
+    return True
+# ... initialize ...
+self._is_initialized = True
+```
+
+### Enum `__str__` override
+All enums in this codebase override `__str__` to return `.value` for clean serialization:
+```python
+class ChannelType(str, Enum):
+    PINDUODUO = "pinduoduo"
+    def __str__(self):
+        return self.value
+```
+
+---
+
+## Anti-patterns to Avoid
+
+- Do NOT use `print()` — always use the logger
+- Do NOT import between sibling modules at the top level if it creates circular dependencies — use lazy imports inside functions
+- Do NOT hold SQLAlchemy sessions across `await` boundaries — keep sessions synchronous and use `asyncio.to_thread` if needed
+- Do NOT skip `can_handle()` logic — keep it pure and fast with no side effects
+- Do NOT register the same service twice in DI — always guard with `container.is_registered()`
+- Do NOT create new `asyncio` event loops from async context — use `asyncio.to_thread` instead

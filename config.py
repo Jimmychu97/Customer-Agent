@@ -6,7 +6,6 @@
 """
 import json
 import threading
-from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
@@ -31,19 +30,8 @@ class LLMConfig(BaseModel):
 
 
 class BusinessHoursConfig(BaseModel):
-    """营业时间配置模型"""
-    start: str = Field(default="08:00", description="开始时间")
-    end: str = Field(default="23:00", description="结束时间")
-
-    @field_validator('start', 'end')
-    @classmethod
-    def validate_time_format(cls, v: str) -> str:
-        """验证时间格式 HH:MM"""
-        try:
-            datetime.strptime(v, '%H:%M')
-            return v
-        except ValueError:
-            raise ValueError('时间格式必须为HH:MM，例如08:00')
+    """AI回复开关配置"""
+    enabled: bool = Field(default=True, description="是否启用AI自动回复")
 
 class PromptConfig(BaseModel):
     """提示词配置模型"""
@@ -96,8 +84,7 @@ class ConfigModel(BaseModel):
 # 默认配置基础数据
 config_base = {
     "business_hours": {
-        "start": "08:00",
-        "end": "23:00"
+        "enabled": True
     },
     "llm": {
         "model_name": "",

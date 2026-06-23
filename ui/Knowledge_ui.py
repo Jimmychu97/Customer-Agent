@@ -142,7 +142,7 @@ class CsAddEditDialog(QDialog):
         super().__init__(parent)
         self.shop_id = shop_id
         self.existing = existing
-        self.default_tags = ["物流", "售后", "支付", "商品规格", "优惠券", "会员", "发货时间", "退换货"]
+        self.default_tags = ["物流", "售后","售前", "支付", "商品规格", "优惠券", "会员", "发货时间", "退换货"]
         self.setWindowTitle("添加客服知识" if not existing else "编辑客服知识")
         self.resize(650, 500)
         self._init_ui()

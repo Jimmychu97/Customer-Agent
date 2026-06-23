@@ -1,87 +1,107 @@
 # Technology Stack
 
-## Languages & Runtime
+## Language & Runtime
+
 - Python 3.11 (pinned via `.python-version`)
-- Windows desktop target (primary platform)
+- Windows desktop application (no cross-platform requirement)
+- Package manager: `uv` with `pyproject.toml` (hatchling build backend)
 
-## Package Manager
-- `uv` — fast Python package manager and virtual environment tool
-- Project definition: `pyproject.toml` (hatchling build backend)
-
-## Key Dependencies
-
-| Category | Library | Version | Purpose |
-|---|---|---|---|
-| UI | PyQt6 | >=6.9.0 | Desktop GUI framework |
-| UI | pyqt6-fluent-widgets | >=1.9.0 | Fluent Design UI components |
-| AI/LLM | openai | >=1.109.1 | OpenAI-compatible API client |
-| AI/LLM | tiktoken | >=0.12.0 | Token counting |
-| Database | SQLAlchemy | >=2.0.43 | ORM and session management |
-| Async | websockets | >=10.4 | WebSocket client for PDD |
-| Async | aiohttp | >=3.13.2 | Async HTTP client |
-| Async | aiofiles | >=25.1.0 | Async file I/O |
-| Browser | playwright | >=1.52.0 | Automated PDD login / cookie refresh |
-| Config | pydantic | >=2.5.0 | Config model validation |
-| Logging | loguru | >=0.7.0 | Structured logging with rotation |
-| NLP | jieba | >=0.42.1 | Chinese word segmentation for knowledge retrieval |
-| HTTP | requests | >=2.28.0 | Synchronous HTTP requests |
-| Data | pandas | >=2.1.0,<2.3.0 | Data processing |
-| Data | numpy | >=1.24.0,<2.0.0 | Numerical operations |
-| Docs | pypdf | latest | PDF parsing |
-| Docs | python-docx | >=1.2.0 | Word document parsing |
-| Docs | openpyxl | >=3.1.5 | Excel (xlsx) parsing |
-| Docs | xlrd | >=2.0.2 | Excel (xls) parsing |
-| Image | Pillow | >=12.0.0 | Image processing |
-| Cloud | volcengine | >=1.0.209 | Volcengine (Doubao) SDK |
-| Build | pyinstaller | >=6.0.0 (optional) | Windows exe packaging |
-
-## Development Commands
+## Run & Build Commands
 
 ```bash
 # Install dependencies
 uv sync
+
+# Install Playwright browsers (required for PDD login)
+uv run playwright install chromium
 
 # Run application
 uv run python app.py
 # or
 python app.py
 
-# Install Playwright browser (required once)
-uv run playwright install chromium
-
-# Build Windows executable
+# Build standalone Windows exe (PyInstaller)
 python scripts/build_win_exe.py --clean
+# Output: dist/AgentCustomer/
+```
 
-# Run test scripts
-uv run python scripts/test_gsx.py
-uv run python scripts/test_sku.py
+## Core Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `pyqt6` | >=6.9.0 | Desktop UI framework |
+| `pyqt6-fluent-widgets` | >=1.9.0 | Fluent Design UI components |
+| `pydantic` | >=2.5.0 | Data validation, config models, message models |
+| `sqlalchemy` | >=2.0.43 | ORM, SQLite database |
+| `openai` | >=1.109.1 | OpenAI-compatible LLM client |
+| `loguru` | >=0.7.0 | Structured logging with rotation |
+| `websockets` | >=10.4 | Async WebSocket client (PDD connection) |
+| `playwright` | >=1.52.0 | Browser automation (PDD login/cookie refresh) |
+| `requests` | >=2.28.0 | HTTP API calls |
+| `aiohttp` | >=3.13.2 | Async HTTP |
+| `jieba` | >=0.42.1 | Chinese text segmentation (knowledge search) |
+| `tiktoken` | >=0.12.0 | Token counting for LLM context management |
+| `pandas` | >=2.1.0,<2.3.0 | Data manipulation |
+| `numpy` | >=1.24.0,<2.0.0 | Numeric operations |
+| `pillow` | >=12.0.0 | Image processing |
+| `pypdf` | latest | PDF document parsing |
+| `python-docx` | >=1.2.0 | Word document parsing |
+| `openpyxl` | >=3.1.5 | Excel file parsing |
+| `xlrd` | >=2.0.2 | Legacy Excel reading |
+| `volcengine` | >=1.0.209 | Volcengine (Doubao/ByteDance) SDK |
+| `aiofiles` | >=25.1.0 | Async file I/O |
+
+## Optional / Build-only Dependencies
+
+```toml
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0.0"]
 ```
 
 ## Database
-- SQLite via SQLAlchemy ORM
-- Default path: `./temp/channel_shop.db`
-- Configurable via `config.json` → `db_path`
-- Connection pool configured in `database/connection_pool.py`
+
+- SQLite (file: `temp/channel_shop.db`)
+- SQLAlchemy ORM with `declarative_base()`
+- Tables: `channels`, `shops`, `accounts`, `keywords`, `product_knowledge`, `customer_service_knowledge`, `coupons`, `vouchers`, `voucher_logs`, `goods_commit`, `orders`
+
+## AI / LLM Integration
+
+- OpenAI-compatible API (any provider): DeepSeek, Doubao (Volcengine), Kimi (Moonshot), etc.
+- Custom Agent framework in `Agent/CustomerAgent/custom/`:
+  - Multi-turn tool calling loop
+  - Per-user session history management
+  - Tool registration via `@tool` decorator
+  - tiktoken-based token budget tracking
 
 ## Logging
-- Loguru with automatic file rotation (10 MB, 5 backups, zip compression)
+
+- Loguru with file rotation at 10 MB, 5 backup files (zip compressed)
 - Log file: `logs/app.log`
-- Console output enabled in development (disabled in frozen/packaged exe)
-- Level controlled via `LOG_LEVEL` environment variable (default: `info`)
-- Per-module loggers via `get_logger("ModuleName")`
-- `UILogHandler` bridges Loguru → PyQt6 signals for in-app log viewer
+- Console output disabled in PyInstaller frozen builds
+- `get_logger(name)` factory function used throughout
+- `UILogHandler` bridges Loguru → PyQt6 signal for live log viewer in UI
 
-## LLM Integration
-- Supports any OpenAI-compatible API endpoint
-- Configured via `config.json`: `llm.api_base`, `llm.api_key`, `llm.model_name`
-- Compatible providers: DeepSeek, Doubao (Volcengine), Kimi (Moonshot), OpenAI
+## Async Architecture
 
-## Browser Automation
-- Playwright Chromium for Pinduoduo automated login and cookie refresh
-- Browser binaries stored at `.browsers/` in project root
-- Path configured via `PLAYWRIGHT_BROWSERS_PATH` env var (supports packaged exe)
+- Each `AutoReplyThread` (QThread) runs its own `asyncio` event loop
+- `asyncio.Queue` used for message queuing
+- `asyncio.Semaphore` for concurrency control in message consumer
+- `asyncio.create_task` with `done_callback` for task lifecycle tracking
+- WebSocket connection via `websockets` library in async context
 
-## Build & Distribution
-- PyInstaller spec: `scripts/agent_customer.spec`
-- Build script: `scripts/build_win_exe.py --clean`
-- Output: `dist/AgentCustomer/` — self-contained, no Python required
+## Config System
+
+- `config.json` in project root (auto-created on first run)
+- `Config` class in `config.py`: thread-safe with `threading.RLock()`
+- Pydantic `ConfigModel` for validation
+- Supports dot-notation access: `config.get("llm.api_key")`
+- Atomic save via temp file + rename
+- `@contextmanager` `atomic_update()` for rollback-safe batch updates
+- Global convenience functions: `get_config()`, `set_config()`, `save_config()`
+
+## Packaging (PyInstaller)
+
+- Spec file: `scripts/agent_customer.spec`
+- Build script: `scripts/build_win_exe.py`
+- Playwright browsers bundled in `.browsers/` relative to exe
+- `runtime_path.py` and `path_utils.py` handle `sys._MEIPASS` paths in frozen builds
