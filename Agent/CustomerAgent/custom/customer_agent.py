@@ -165,8 +165,9 @@ class CustomerAgent(Bot):
 
         try:
             # 构建 session_id 和 dependencies
-            if context and context.channel_type and hasattr(context.kwargs, "user_id"):
-                session_id = f"{context.channel_type.value}{context.kwargs.user_id}"
+            from_uid = getattr(context.kwargs, "from_uid", None) if context else None
+            if context and context.channel_type and from_uid:
+                session_id = f"{context.channel_type.value}{from_uid}"
                 dependencies = self._message_builder.build_dependencies(context)
             else:
                 # 降级：使用 query hash 作为 session_id
@@ -178,6 +179,14 @@ class CustomerAgent(Bot):
             if self._session_manager.should_compress(session_id):
                 logger.info(f"触发上下文压缩: session_id={session_id}")
                 await self._compress_with_llm(session_id, history)
+                history = self._session_manager.get_history(session_id)  # 压缩后重新拉取
+
+            # 保存用户消息到历史
+            self._session_manager.add_message(
+                session_id=session_id,
+                role="user",
+                content=query,
+            )
 
             # 构建 messages
             messages = self._message_builder.build_messages(query, history, dependencies)
