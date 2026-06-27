@@ -11,14 +11,23 @@ from utils.logger_loguru import get_logger
 class MessageHandlerMixin:
     """消息处理 Mixin"""
 
-    async def _setup_message_consumer(self, queue_name: str):
-        """设置消息消费者和处理器链"""
+    async def _setup_message_consumer(self, queue_name: str, reuse: bool = False):
+        """设置消息消费者和处理器链
+
+        Args:
+            queue_name: 队列名称
+            reuse: True=如果消费者已存在且运行中则直接复用（重连场景）
+        """
         from Message import message_consumer_manager, queue_manager, handler_chain
         from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
 
         try:
             existing_consumer = message_consumer_manager.get_consumer(queue_name)
             if existing_consumer:
+                # 重连时且消费者运行中，直接复用不重建
+                if reuse and existing_consumer.is_running():
+                    self.logger.debug(f"复用已有消费者: {queue_name}")
+                    return
                 self.logger.info(f"消费者 {queue_name} 已存在，先停止并重新创建")
                 try:
                     await message_consumer_manager.stop_consumer(queue_name)

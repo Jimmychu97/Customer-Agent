@@ -13,7 +13,7 @@ import importlib
 
 
 def _make_session() -> requests.Session:
-    """创建带自动重试的独立 Session"""
+    """创建带自动重试的独立 Session，强制直连不走系统代理"""
     session = requests.Session()
     retry = Retry(
         total=3,
@@ -25,6 +25,8 @@ def _make_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry, pool_connections=2, pool_maxsize=10)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+    # 强制直连：防止服务器上识别到失效代理导致请求失败
+    session.proxies = {"http": "", "https": ""}
     return session
 
 

@@ -37,22 +37,40 @@ class PDDLogin():
         self.base_url = "https://mms.pinduoduo.com/login"
         self.name = name
         self.password = password
+    async def _dismiss_modal(self, page) -> None:
+        """关闭拼多多登录页可能出现的弹窗（如协议确认、活动弹窗等）"""
+        try:
+            # 尝试点击弹窗中常见的确认/关闭按钮，不存在时静默跳过
+            modal = page.locator("[data-testid='beast-core-modal-container']")
+            if await modal.count() > 0:
+                # 优先点击「确认」「我知道了」「关闭」类按钮
+                for btn_text in ["确认", "我知道了", "关闭", "取消"]:
+                    btn = modal.locator(f"button:has-text('{btn_text}')")
+                    if await btn.count() > 0:
+                        await btn.first.click()
+                        self.logger.debug(f"关闭弹窗: 点击了 '{btn_text}'")
+                        await page.wait_for_timeout(300)
+                        return
+                # 无匹配按钮时按 Escape 关闭
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(300)
+        except Exception as e:
+            self.logger.debug(f"关闭弹窗失败（忽略）: {e}")
+
     async def login(self, headless=False):
         """使用账号密码登录
 
         Args:
             headless: 是否使用无头模式（自动回退时使用 True，避免弹出浏览器窗口）
-
         """
+        playwright = None
+        context = None
         try:
-            # 启动Playwright
             playwright = await async_playwright().start()
 
-            # 创建独立的用户数据目录，避免多实例冲突
             user_data_dir = str(app_dir / "user_data" / self.name)
             self.logger.debug(f"使用用户数据目录: {user_data_dir}")
 
-            # 使用持久化上下文，自动处理用户数据目录
             context = await playwright.chromium.launch_persistent_context(
                 user_data_dir,
                 headless=headless,
@@ -61,49 +79,58 @@ class PDDLogin():
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-blink-features=AutomationControlled',
-                    '--disable-notifications',  # 禁用通知
+                    '--disable-notifications',
                     '--disable-web-security',
                     '--disable-features=VizDisplayCompositor'
                 ]
             )
-            
+
             page = await context.new_page()
-            
-            # 访问登录页面
+
             await page.goto(self.base_url)
-            
-            # 点击账号密码登录
-            await page.click("div.Common_item__3diIn:has-text('账号登录')")
-            
-            # 等待页面加载
+
+            # 关闭可能遮挡「账号登录」按钮的弹窗
+            await self._dismiss_modal(page)
+
+            # 点击账号密码登录（使用 force=True 跳过可见性检查，并在超时时再次尝试关闭弹窗）
+            try:
+                await page.click("div.Common_item__3diIn:has-text('账号登录')", timeout=10000)
+            except Exception:
+                self.logger.debug("首次点击账号登录失败，再次尝试关闭弹窗后重试")
+                await self._dismiss_modal(page)
+                await page.click("div.Common_item__3diIn:has-text('账号登录')", timeout=15000)
+
             await page.wait_for_selector("input[type='text']")
-            
-            # 输入店铺名
+
             await page.fill("input[type='text']", self.name)
-            
-            # 输入密码
             await page.fill("input[type='password']", self.password)
-            
-            # 点击登录按钮
+
             await page.click("button:has-text('登录')")
-            
-            # 等待页面 title等于 拼多多 商家后台，首页或者订单查询
-            await page.wait_for_function("() => document.title === '拼多多 商家后台' || document.title === '首页' || document.title === '订单查询'", timeout=30000)
-            
-            # 获取cookies并转换为字典格式
+
+            await page.wait_for_function(
+                "() => document.title === '拼多多 商家后台' || document.title === '首页' || document.title === '订单查询'",
+                timeout=30000
+            )
+
             cookies_list = await context.cookies()
-            # 将playwright格式的cookies列表转换为字典格式，使用安全的get方法
             cookies_dict = {cookie.get('name', ''): cookie.get('value', '') for cookie in cookies_list if cookie.get('name')}
             cookies_json = json.dumps(cookies_dict)
-            # 关闭浏览器上下文
-            await context.close()
-            await playwright.stop()
-                
             return cookies_json
-            
+
         except Exception as e:
             self.logger.error(f"登录失败: {str(e)}")
             return False
+        finally:
+            if context:
+                try:
+                    await context.close()
+                except Exception as e:
+                    self.logger.debug(f"关闭浏览器上下文失败: {e}")
+            if playwright:
+                try:
+                    await playwright.stop()
+                except Exception as e:
+                    self.logger.debug(f"停止Playwright失败: {e}")
         
     async def refresh_cookies(self):
         """重新获取cookies，使用已保存的用户数据，无需再次登录
