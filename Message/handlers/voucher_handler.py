@@ -32,14 +32,14 @@ def _extract_serial(text: str) -> Optional[str]:
     """提取苹果序列号
     苹果序列号规则：
     - 8-12位字母数字混合
-    - 只含大写字母 A-Z 和数字 0-9
-    - 不含 O（字母）、I、S（易与 0、5 混淡）
+    - 只含大写字母 A-Z 和数字 0-9 
     - 必须含有字母（排除纯数字）
+    - 用户输入的 o/O 自动替换为 0
     """
-    # 苹果序列号不包含 O、I、S
+    # 将大小写 o/O 替换为 0，再转大写
     APPLE_CHARS = r'[A-HJ-NP-RT-Z0-9]'
-    upper = text.upper()
-    for m in re.finditer(rf'(?<![A-Z0-9])({APPLE_CHARS}{{8,12}})(?![A-Z0-9])', upper):
+    normalized = text.replace('o', '0').replace('O', '0').upper()
+    for m in re.finditer(rf'(?<![A-Z0-9])({APPLE_CHARS}{{8,12}})(?![A-Z0-9])', normalized):
         val = m.group(1)
         letters = len(re.findall(r'[A-Z]', val))
         if letters >= 2:
@@ -291,9 +291,9 @@ class VoucherDetectionHandler(BaseHandler):
         )
         status = _VOUCHER_SUCCESS if result_text and "核销成功" in result_text else _VOUCHER_FAILED
         if status == _VOUCHER_SUCCESS and gsx_params:
-            goods_id, spec = gsx_params
+            goods_id, spec, gsx_data = gsx_params
             # GSX报告 → AI分析 → 核销成功 → 五星好评
-            await self._query_gsx_and_send(sn, goods_id, spec, order_id, shop_id, user_id, from_uid, result_text)
+            await self._query_gsx_and_send(sn, goods_id, spec, gsx_data, order_id, shop_id, user_id, from_uid, result_text)
             return None, status  # 核销成功时消息已在 _query_gsx_and_send 里全部发送
         return result_text, status
 
@@ -306,7 +306,9 @@ class VoucherDetectionHandler(BaseHandler):
         from_uid: str,
         order_id: int,
     ) -> Tuple[str, Optional[Tuple[str, str]]]:
-        """MMS 验券 + 核销，返回 (result_text, gsx_params)"""
+        """MMS 验券 + GSX查询 + 核销，返回 (result_text, gsx_params)
+        顺序：preview → GSX查询（失败则提示重新提供序列号，不核销）→ verification → 更新DB
+        """
         from Channel.pinduoduo.utils.API.mms_voucher_api import MmsVoucherAPI
         api = MmsVoucherAPI(shop_id=shop_id, user_id=user_id)
 
@@ -320,16 +322,36 @@ class VoucherDetectionHandler(BaseHandler):
         order_sn = preview.get("order_sn", "")
         order_amount = preview.get("order_amount", 0)
         store_id = preview.get("store_id", 0)
+        goods_id = str(preview.get("goods_id", ""))
 
         self.logger.info(
             f"[核销] 验券成功 card_no={voucher_code} order_sn={order_sn} goods={goods_name}"
         )
 
+        # GSX 查询：核销前先验证序列号，失败则清空 sn_imei 让用户重新提供
+        gsx_data = None
+        gsx_key = self._get_gsx_key(goods_id, spec)
+        if gsx_key:
+            from Channel.pinduoduo.utils.API.gsx_api import query_gsx
+            gsx_result = query_gsx(serial, gsx_key)
+            if not gsx_result["success"]:
+                self.logger.warning(
+                    f"[核销] GSX查询失败，序列号可能有误 sn={serial} key={gsx_key}: {gsx_result.get('error_msg')}"
+                )
+                self._clear_order_sn(order_id)
+                return (
+                    f"序列号/IMEI 查询失败，可能有误：{gsx_result.get('error_msg', '未知错误')}\n"
+                    f"请重新提供正确的序列号或IMEI码"
+                ), None
+            gsx_data = gsx_result["data"]
+        else:
+            self.logger.warning(f"[核销] 未找到 GSX key，跳过序列号验证 goods_id={goods_id} spec={spec!r}")
+
         result = api.verification(voucher_code, store_id=store_id or 0, order_sn=order_sn or "")
         if result["success"]:
             self._update_order_status(order_id, 1)
             self.logger.info(f"[核销] 核销成功 serial={serial} card_no={voucher_code} order_id={order_id}")
-            gsx_params = (str(preview.get("goods_id", "")), spec)
+            gsx_params = (goods_id, spec, gsx_data)
             return (
                 f"核销成功！\n"
                 f"序列号/IMEI：{serial}\n"
@@ -344,45 +366,57 @@ class VoucherDetectionHandler(BaseHandler):
             self._update_order_status(order_id, 2)
             return f"核销失败：{result.get('error_msg', '未知错误')}\n卡券号：{voucher_code}", None
 
+    def _get_gsx_key(self, goods_id: str, spec: str) -> Optional[str]:
+        """从 GoodsCommit 查询 GSX 接口编码"""
+        try:
+            from database import db_manager
+            from database.models import GoodsCommit
+            with db_manager.session_scope() as session:
+                gc = session.query(GoodsCommit).filter_by(
+                    goods_id=goods_id, spec_name=spec
+                ).first()
+                return str(gc.server_id) if gc and gc.server_id else None
+        except Exception as e:
+            self.logger.error(f"[核销] 查询 GSX key 失败: {e}")
+            return None
+
+    def _clear_order_sn(self, order_id: Optional[int]) -> None:
+        """清空 Order 的 sn_imei，让用户可以重新提供序列号"""
+        if not order_id:
+            return
+        try:
+            from database import db_manager
+            from database.models import Order
+            with db_manager.session_scope() as session:
+                order = session.query(Order).filter_by(id=order_id).first()
+                if order:
+                    order.sn_imei = ""
+        except Exception as e:
+            self.logger.error(f"[核销] 清空 sn_imei 失败 order_id={order_id}: {e}")
+
     async def _query_gsx_and_send(
-        self, serial: str, goods_id: str, spec: str,
+        self, serial: str, goods_id: str, spec: str, gsx_data: Optional[dict],
         order_id: int, shop_id: str, user_id: str, from_uid: str,
         voucher_success_text: str = ""
     ) -> None:
-        """异步调 GSX 查询，保存结果并发送给用户
+        """发送 GSX 报告（数据已在 _query_and_verify 中获取）
         发送顺序：GSX报告 → AI分析 → 核销成功 → 五星好评
         """
         try:
             from database import db_manager
-            from database.models import GoodsCommit, Order
-            from Channel.pinduoduo.utils.API.gsx_api import query_gsx
+            from database.models import Order
 
-            with db_manager.session_scope() as session:
-                gc = session.query(GoodsCommit).filter_by(
-                    goods_id=goods_id,
-                    spec_name=spec,
-                ).first()
-                gsx_key = str(gc.server_id) if gc and gc.server_id else None
-
-            if not gsx_key:
-                self.logger.warning(
-                    f"GSX查询：未在 GoodsCommit 找到 "
-                    f"goods_id={goods_id} spec_name={spec!r} 对应的 server_id，跳过 GSX 查询"
-                )
+            if not gsx_data:
+                self.logger.warning(f"[核销] 无 GSX 数据，跳过报告发送 sn={serial}")
+                if voucher_success_text:
+                    await self._send(shop_id, user_id, from_uid, voucher_success_text)
                 return
 
-            result = await asyncio.to_thread(query_gsx, serial, gsx_key)
-            if not result["success"]:
-                self.logger.warning(f"[核销] GSX查询失败 sn={serial}: {result.get('error_msg')}")
-                return
-
-            gsx_data = result["data"]
-            self.logger.info(f"[核销] GSX查询完成 sn={serial} key={gsx_key}")
-
+            gsx_key = self._get_gsx_key(goods_id, spec)
             with db_manager.session_scope() as session:
                 order = session.query(Order).filter_by(id=order_id).first()
                 if order:
-                    order.sku_id = gsx_key
+                    order.sku_id = gsx_key or ""
                     order.gsx_result = json.dumps(gsx_data, ensure_ascii=False)
 
             gsx_text = _format_gsx_result(gsx_data)
