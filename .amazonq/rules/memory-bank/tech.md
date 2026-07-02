@@ -1,179 +1,138 @@
 # Tech Stack: Agent-Customer
 
 ## Language & Runtime
-<<<<<<< HEAD
+- Python >= 3.11（使用 `.python-version` 文件锁定版本）
+- Windows 操作系统（PyQt6 桌面应用）
 
-- **Python >= 3.11** (`.python-version` pins version)
-- **Windows only** (UI framework and Playwright dependencies)
-- **Package manager**: `uv` (with `uv.lock` for reproducible installs)
-- **Build backend**: `hatchling`
+## Package Manager
+- **uv**（推荐，替代 pip/poetry）
+- 依赖定义：`pyproject.toml`
+- 锁文件：`uv.lock`
 
 ## Core Dependencies
 
-| Category | Package | Version | Purpose |
-|----------|---------|---------|---------|
-| UI | `pyqt6` | >=6.9.0 | Desktop GUI framework |
-| UI | `pyqt6-fluent-widgets` | >=1.9.0 | Fluent Design UI components |
-| AI | `openai` | >=1.109.1 | OpenAI-compatible API client |
-| Config | `pydantic` | >=2.5.0 | Config validation models |
-| Database | `sqlalchemy` | >=2.0.43 | ORM + SQLite |
-| WebSocket | `websockets` | >=10.4 | PDD WebSocket connection |
-| Browser | `playwright` | >=1.52.0 | PDD auto-login & cookie refresh |
-| HTTP | `requests` | >=2.28.0 | Sync HTTP (PDD API calls) |
-| HTTP async | `aiohttp` | >=3.13.2 | Async HTTP |
-| Logging | `loguru` | >=0.7.0 | Structured logging |
-| Tokenization | `tiktoken` | >=0.12.0 | LLM token counting |
-| NLP | `jieba` | >=0.42.1 | Chinese word segmentation for KB search |
-| Data | `pandas` | >=2.1.0,<2.3.0 | Data manipulation |
-| Data | `numpy` | >=1.24.0,<2.0.0 | Numerical operations |
-| File parsing | `pypdf` | latest | PDF document parsing |
-| File parsing | `python-docx` | >=1.2.0 | Word document parsing |
-| File parsing | `openpyxl` | >=3.1.5 | Excel (.xlsx) parsing |
-| File parsing | `xlrd` | >=2.0.2 | Excel (.xls) parsing |
-| Image | `pillow` | >=12.0.0 | Image processing |
-| Volcengine | `volcengine` | >=1.0.209 | Doubao/Volcengine LLM SDK |
-| Async file | `aiofiles` | >=25.1.0 | Async file I/O |
+### UI 框架
+| 包 | 版本 | 用途 |
+|----|------|------|
+| `pyqt6` | >=6.9.0 | 桌面 GUI 框架 |
+| `pyqt6-fluent-widgets` | >=1.9.0 | Fluent Design 风格组件库 |
+
+### AI / LLM
+| 包 | 版本 | 用途 |
+|----|------|------|
+| `openai` | >=1.109.1 | OpenAI 兼容 API 客户端 |
+| `tiktoken` | >=0.12.0 | Token 统计 |
+
+### 数据库
+| 包 | 版本 | 用途 |
+|----|------|------|
+| `sqlalchemy` | >=2.0.43 | ORM + SQLite |
+
+### 配置与验证
+| 包 | 版本 | 用途 |
+|----|------|------|
+| `pydantic` | >=2.5.0 | 配置模型验证（v2 API） |
+
+### 异步通信
+| 包 | 版本 | 用途 |
+|----|------|------|
+| `websockets` | >=10.4 | WebSocket 客户端 |
+| `aiohttp` | >=3.13.2 | 异步 HTTP |
+| `aiofiles` | >=25.1.0 | 异步文件 IO |
+
+### 浏览器自动化
+| 包 | 版本 | 用途 |
+|----|------|------|
+| `playwright` | >=1.52.0 | 拼多多自动登录 / Cookie 刷新 |
+
+### 中文处理
+| 包 | 版本 | 用途 |
+|----|------|------|
+| `jieba` | >=0.42.1 | 中文分词（知识库检索） |
+
+### 日志
+| 包 | 版本 | 用途 |
+|----|------|------|
+| `loguru` | >=0.7.0 | 结构化日志 |
+
+### 文档解析
+| 包 | 版本 | 用途 |
+|----|------|------|
+| `pypdf` | latest | PDF 解析 |
+| `python-docx` | >=1.2.0 | Word 文档解析 |
+| `openpyxl` | >=3.1.5 | Excel 解析（xlsx） |
+| `xlrd` | >=2.0.2 | Excel 解析（xls） |
+
+### 数据处理
+| 包 | 版本 | 用途 |
+|----|------|------|
+| `pandas` | >=2.1.0,<2.3.0 | 数据处理 |
+| `numpy` | >=1.24.0,<2.0.0 | 数值计算 |
+| `pillow` | >=12.0.0 | 图像处理 |
+
+### 其他
+| 包 | 版本 | 用途 |
+|----|------|------|
+| `requests` | >=2.28.0 | 同步 HTTP |
+| `volcengine` | >=1.0.209 | 火山引擎 SDK |
+
+### 可选依赖（构建）
+| 包 | 版本 | 用途 |
+|----|------|------|
+| `pyinstaller` | >=6.0.0 | 打包为 Windows exe |
+
+## Build System
+- `hatchling`（pyproject.toml build-backend）
+- 打包目标包：`Agent`, `Channel`, `Message`, `bridge`, `core`, `database`, `ui`, `utils`, `scripts`
 
 ## Development Commands
-=======
-
-- Python 3.11 (pinned via `.python-version`)
-- Windows desktop application (no cross-platform requirement)
-- Package manager: `uv` with `pyproject.toml` (hatchling build backend)
-
-## Run & Build Commands
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
 
 ```bash
-# Install dependencies
+# 安装依赖
 uv sync
 
-# Install Playwright browsers (required for PDD login)
+# 安装 Playwright 浏览器（必须执行一次）
 uv run playwright install chromium
 
-# Run application
+# 启动应用
 uv run python app.py
+# 或
+python app.py
 
-<<<<<<< HEAD
-# Install Playwright browser (required for PDD login)
-uv run playwright install chromium
+# 打包为 Windows exe
+python scripts/build_win_exe.py --clean
 
-# Build Windows executable
-python scripts/build_win_exe.py --clean
-# Output: dist/AgentCustomer/
-=======
-# Build standalone Windows exe (PyInstaller)
-python scripts/build_win_exe.py --clean
-# Output: dist/AgentCustomer/
+# 测试 GSX 接口
+python scripts/test_gsx.py
+
+# 测试 SKU 同步
+python scripts/test_sku.py
 ```
 
-## Core Dependencies
-
-| Package | Version | Purpose |
-|---------|---------|---------|
-| `pyqt6` | >=6.9.0 | Desktop UI framework |
-| `pyqt6-fluent-widgets` | >=1.9.0 | Fluent Design UI components |
-| `pydantic` | >=2.5.0 | Data validation, config models, message models |
-| `sqlalchemy` | >=2.0.43 | ORM, SQLite database |
-| `openai` | >=1.109.1 | OpenAI-compatible LLM client |
-| `loguru` | >=0.7.0 | Structured logging with rotation |
-| `websockets` | >=10.4 | Async WebSocket client (PDD connection) |
-| `playwright` | >=1.52.0 | Browser automation (PDD login/cookie refresh) |
-| `requests` | >=2.28.0 | HTTP API calls |
-| `aiohttp` | >=3.13.2 | Async HTTP |
-| `jieba` | >=0.42.1 | Chinese text segmentation (knowledge search) |
-| `tiktoken` | >=0.12.0 | Token counting for LLM context management |
-| `pandas` | >=2.1.0,<2.3.0 | Data manipulation |
-| `numpy` | >=1.24.0,<2.0.0 | Numeric operations |
-| `pillow` | >=12.0.0 | Image processing |
-| `pypdf` | latest | PDF document parsing |
-| `python-docx` | >=1.2.0 | Word document parsing |
-| `openpyxl` | >=3.1.5 | Excel file parsing |
-| `xlrd` | >=2.0.2 | Legacy Excel reading |
-| `volcengine` | >=1.0.209 | Volcengine (Doubao/ByteDance) SDK |
-| `aiofiles` | >=25.1.0 | Async file I/O |
-
-## Optional / Build-only Dependencies
-
-```toml
-[project.optional-dependencies]
-build = ["pyinstaller>=6.0.0"]
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
-```
+## Supported LLM Providers（OpenAI 兼容接口）
+| 服务 | api_base | model_name 示例 |
+|------|----------|-----------------|
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| 豆包（火山引擎） | `https://ark.cn-beijing.volces.com/api/v3` | `doubao-seed-1-6-flash-250828` |
+| Kimi | `https://api.moonshot.cn/v1` | `moonshot-v1-8k` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
 
 ## Database
-
-<<<<<<< HEAD
-- **Engine**: SQLite via SQLAlchemy 2.x (async-capable ORM)
-- **Location**: Auto-configured via `config.json` → `db_path`
-- **Models**: `Shop`, `ProductKnowledge`, `CustomerServiceKnowledge`, `Keyword`, etc. in `database/models.py`
-- **Access pattern**: Session-per-operation via `db_manager` (connection pool in `database/connection_pool.py`)
-
-## Configuration System
-
-- **File**: `config.json` (auto-generated on first run from `config_base` defaults)
-- **Manager**: `config.py` → `Config` class with thread-safe `RLock`, Pydantic validation, atomic saves
-- **Access pattern**: `config.get("llm.api_key")` (dot-notation for nested keys) or `config.get_model()` for typed `ConfigModel`
-- **Global instance**: `from config import config` — imported first in `app.py`
+- SQLite（文件路径由 `config.json` 中 `db_path` 配置，默认 `./temp/channel_shop.db`）
+- ORM：SQLAlchemy 2.x（declarative base）
 
 ## Logging
+- Loguru（`utils/logger_loguru.py`）
+- 日志文件：`logs/app.log`
+- 获取 logger：`from utils.logger_loguru import get_logger; logger = get_logger("ModuleName")`
 
-- **Library**: Loguru
-- **Setup**: `utils/logger_loguru.py` → `get_logger(name)` returns named logger
-- **Output**: `logs/app.log` + console
-- **Pattern**: `logger = get_logger("ModuleName")` at module top level
+## Configuration
+- 文件：`config.json`（首次运行自动生成）
+- 访问：`from config import config; config.get("llm.api_key")`
+- 支持点号分隔嵌套访问：`config.get("llm.api_key")`
+- 原子保存：临时文件 + `Path.replace()` 重命名
 
-## Build / Packaging
-
-- **Tool**: PyInstaller >= 6.0.0 (optional dependency group `build`)
-- **Spec**: `scripts/agent_customer.spec`
-- **Script**: `scripts/build_win_exe.py` — wraps PyInstaller with clean/copy steps
-- **Playwright browsers**: Packaged into `.browsers/` directory adjacent to exe
-- **Frozen detection**: `getattr(sys, 'frozen', False)` pattern used in `app.py` and `utils/runtime_path.py`
-=======
-- SQLite (file: `temp/channel_shop.db`)
-- SQLAlchemy ORM with `declarative_base()`
-- Tables: `channels`, `shops`, `accounts`, `keywords`, `product_knowledge`, `customer_service_knowledge`, `coupons`, `vouchers`, `voucher_logs`, `goods_commit`, `orders`
-
-## AI / LLM Integration
-
-- OpenAI-compatible API (any provider): DeepSeek, Doubao (Volcengine), Kimi (Moonshot), etc.
-- Custom Agent framework in `Agent/CustomerAgent/custom/`:
-  - Multi-turn tool calling loop
-  - Per-user session history management
-  - Tool registration via `@tool` decorator
-  - tiktoken-based token budget tracking
-
-## Logging
-
-- Loguru with file rotation at 10 MB, 5 backup files (zip compressed)
-- Log file: `logs/app.log`
-- Console output disabled in PyInstaller frozen builds
-- `get_logger(name)` factory function used throughout
-- `UILogHandler` bridges Loguru → PyQt6 signal for live log viewer in UI
-
-## Async Architecture
-
-- Each `AutoReplyThread` (QThread) runs its own `asyncio` event loop
-- `asyncio.Queue` used for message queuing
-- `asyncio.Semaphore` for concurrency control in message consumer
-- `asyncio.create_task` with `done_callback` for task lifecycle tracking
-- WebSocket connection via `websockets` library in async context
-
-## Config System
-
-- `config.json` in project root (auto-created on first run)
-- `Config` class in `config.py`: thread-safe with `threading.RLock()`
-- Pydantic `ConfigModel` for validation
-- Supports dot-notation access: `config.get("llm.api_key")`
-- Atomic save via temp file + rename
-- `@contextmanager` `atomic_update()` for rollback-safe batch updates
-- Global convenience functions: `get_config()`, `set_config()`, `save_config()`
-
-## Packaging (PyInstaller)
-
-- Spec file: `scripts/agent_customer.spec`
-- Build script: `scripts/build_win_exe.py`
-- Playwright browsers bundled in `.browsers/` relative to exe
-- `runtime_path.py` and `path_utils.py` handle `sys._MEIPASS` paths in frozen builds
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
+## PyInstaller 打包
+- Spec 文件：`scripts/agent_customer.spec`
+- 产物目录：`dist/AgentCustomer/`
+- Playwright 浏览器路径：打包后从 `.browsers/` 目录读取（`PLAYWRIGHT_BROWSERS_PATH` 环境变量）
