@@ -204,7 +204,9 @@ class GoodsCommit(Base):
     parent_name = Column(String(100), nullable=True, comment='规格父类名称')
     spec_id = Column(String(100), nullable=True, comment='规格ID')
     spec_name = Column(String(255), nullable=True, comment='规格名称')
-    server_id = Column('SeverId', Integer, nullable=True, comment='GSX ServerId（接口编码，用于验机查询）')
+    server_id = Column('SeverId', Integer, nullable=True, comment='GSX ServerId（安卓验机接口编码）')
+    zhenxin_server_id = Column(Integer, nullable=True, comment='真心验机 ServerId（苹果验机接口编码）')
+    device_type = Column(String(20), nullable=True, comment='设备类型：apple=苹果，android=安卓')
     synced_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='同步时间')
 
     __table_args__ = (

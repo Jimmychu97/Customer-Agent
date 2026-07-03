@@ -165,15 +165,15 @@ class GoodsManagementWidget(QWidget):
         layout.addWidget(BodyLabel("SKU 规格（来自同步数据）"))
 
         self.sku_table = TableWidget()
-        self.sku_table.setColumnCount(5)
-        self.sku_table.setHorizontalHeaderLabels(["规格名称", "规格类别", "SKU ID", "规格ID", "ServerId"])
-        self.sku_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)  # ServerId 列可双击编辑
+        self.sku_table.setColumnCount(7)
+        self.sku_table.setHorizontalHeaderLabels(["规格名称", "规格类别", "SKU ID", "规格ID", "ServerId", "真心ServerId", "设备类型"])
+        self.sku_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         self.sku_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.sku_table.itemChanged.connect(self._on_sku_item_changed)
 
         header = self.sku_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for col in [1, 2, 3, 4]:
+        for col in [1, 2, 3, 4, 5, 6]:
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.sku_table)
         return container
@@ -326,12 +326,14 @@ class GoodsManagementWidget(QWidget):
                         row.sku_id or "",
                         str(row.spec_id or ""),
                         str(row.server_id) if row.server_id else "",
+                        str(row.zhenxin_server_id) if row.zhenxin_server_id else "",
+                        row.device_type or "",
                     ]
                     self._sku_rows.append({"id": row.id, "sku_id": row.sku_id})
                     for col, val in enumerate(values):
                         item = QTableWidgetItem(str(val))
                         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        # 前 4 列只读，ServerId 列可编辑
+                        # 前 4 列只读，后 3 列可编辑
                         if col < 4:
                             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                         self.sku_table.setItem(i, col, item)
@@ -366,25 +368,33 @@ class GoodsManagementWidget(QWidget):
         self._sync_thread.start()
 
     def _on_sku_item_changed(self, item: QTableWidgetItem):
-        """ServerId 列编辑后保存到数据库"""
-        if item.column() != 4:  # 只处理 ServerId 列
+        """ServerId / 真心ServerId / 设备类型 列编辑后保存到数据库"""
+        col = item.column()
+        if col not in (4, 5, 6):
             return
         row = item.row()
         if not hasattr(self, '_sku_rows') or row >= len(self._sku_rows):
             return
         row_data = self._sku_rows[row]
-        server_id = item.text().strip()
+        value = item.text().strip()
         try:
             from database.db_manager import db_manager
             from database.models import GoodsCommit
             with db_manager.get_session() as session:
                 gc = session.query(GoodsCommit).filter_by(id=row_data["id"]).first()
                 if gc:
-                    gc.server_id = int(server_id) if server_id.isdigit() else None
+                    if col == 4:
+                        gc.server_id = int(value) if value.isdigit() else None
+                        logger.info(f"ServerId 已保存: sku_id={row_data['sku_id']} server_id={value!r}")
+                    elif col == 5:
+                        gc.zhenxin_server_id = int(value) if value.isdigit() else None
+                        logger.info(f"真心ServerId 已保存: sku_id={row_data['sku_id']} zhenxin_server_id={value!r}")
+                    elif col == 6:
+                        gc.device_type = value if value in ("apple", "android") else None
+                        logger.info(f"设备类型 已保存: sku_id={row_data['sku_id']} device_type={value!r}")
                     session.commit()
-                    logger.info(f"ServerId 已保存: sku_id={row_data['sku_id']} server_id={server_id!r}")
         except Exception as e:
-            logger.error(f"保存 ServerId 失败: {e}")
+            logger.error(f"保存 SKU 字段失败: {e}")
 
     def _on_sync_done(self, success: bool, message: str):
         self.sync_btn.setEnabled(True)

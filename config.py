@@ -53,6 +53,11 @@ class GsxConfig(BaseModel):
     style: str = Field(default="11", description="返回格式：11=中文，0=英文")
 
 
+class ZhenxinApiConfig(BaseModel):
+    """真心验机查询接口配置"""
+    apikey: str = Field(default="", description="API 密钥")
+
+
 
 class ConfigModel(BaseModel):
     """配置模型"""
@@ -76,6 +81,10 @@ class ConfigModel(BaseModel):
     gsx: GsxConfig = Field(
         default_factory=GsxConfig,
         description="GSX验机查询配置"
+    )
+    zhenxin_api: ZhenxinApiConfig = Field(
+        default_factory=ZhenxinApiConfig,
+        description="真心验机查询配置"
     )
     db_path: str = Field(default="", description="数据库路径")
 
@@ -101,6 +110,9 @@ config_base = {
         "secret": "",
         "key": "10101",
         "style": "11"
+    },
+    "zhenxin_api": {
+        "apikey": ""
     },
     "prompt": {
         "instructions": [
