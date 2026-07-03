@@ -84,11 +84,7 @@ class MessageBuilder:
 - 用途：用户要求转人工或按指令执行
 - 参数：shop_id、user_id、recipient_uid
 - 示例：用户说"转人工"→调用此工具
-
-💡 重要提示：
-- 工具参数必须使用【当前会话信息】中的值！
-- 知识库没答案时，引导用户查看商品详情页～
-- 工作时间8:00-23:00，其他时间无法转人工哦～
+ 
 """
         parts.append(additional_context)
 

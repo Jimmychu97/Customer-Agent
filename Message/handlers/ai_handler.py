@@ -125,7 +125,7 @@ class AIReplyHandler(BaseHandler):
         """备用回复处理"""
         try:
             # 简单的自动回复
-            reply_text = "亲，感谢您的咨询！客服正在为您处理，请稍等片刻。"
+            reply_text = "亲，感谢您的咨询！我稍后为您解答，请稍等片刻～😊"
 
             # 记录备用回复
             self.logger.info("使用备用回复")
