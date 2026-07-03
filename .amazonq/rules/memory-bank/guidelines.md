@@ -2,35 +2,33 @@
 
 ## Code Quality Standards
 
-<<<<<<< HEAD
-### Module Docstrings
-Every module starts with a triple-quoted docstring describing its purpose:
+### 模块文档字符串
+每个模块顶部必须有三引号文档字符串，说明模块职责：
 ```python
 """
-产品知识自动同步服务
-=================
-从拼多多API拉取商品列表，调用多模态LLM分析提取产品知识存入知识库。
+模块名称
+
+简要说明模块功能和职责。
+如有重要约束（如初始化顺序），在此说明。
 """
 ```
 
-### Class Docstrings
-Classes use brief Chinese docstrings. Long descriptions are on the class line, not `__init__`:
+### 类文档字符串
+类必须有文档字符串，说明职责和核心特性：
 ```python
-class ProductSyncService:
-    """产品知识自动同步服务"""
+class Config:
+    """
+    线程安全的配置管理器
 
-    def __init__(self, knowledge_service: KnowledgeService, request_delay: float = 1.0):
-        """
-        初始化
-
-        Args:
-            knowledge_service: 知识库服务实例
-            request_delay: API请求间隔（秒），避免限流
-        """
+    特性：
+    - 类型安全的配置访问
+    - 配置验证
+    - 线程安全
+    """
 ```
 
-### Method Docstrings
-All public methods use Google-style Args/Returns docstrings:
+### 方法文档字符串（Args/Returns 格式）
+公共方法使用 Google 风格文档字符串：
 ```python
 def get(self, key: str, default: Any = None) -> Any:
     """
@@ -45,357 +43,145 @@ def get(self, key: str, default: Any = None) -> Any:
     """
 ```
 
-### Logging Pattern
-Every module creates a module-level logger using `get_logger`:
-```python
-from utils.logger_loguru import get_logger
+### 私有方法命名
+内部辅助方法以单下划线前缀：`_generate_coupon_id`, `_calculate_discount`, `_get_user_info`
 
-logger = get_logger("ModuleName")
-```
-Classes that need logging also create instance loggers in `__init__`:
-```python
-self.logger = get_logger("ClassName")
-=======
-### Module-level Docstrings
-Every module starts with a triple-quoted docstring describing its purpose, responsibilities, and key design notes. Keep it concise but informative:
-```python
-"""
-AI回复处理器
-专注的AI处理，移除复杂预处理和发送逻辑
-"""
-```
-
-### Logger Initialization Pattern
-Always use `get_logger` from `utils.logger_loguru` at the module or class level. Never use `print()` for operational output:
-```python
-from utils.logger_loguru import get_logger
-
-logger = get_logger("ModuleName")          # module-level
-self.logger = get_logger("ClassName")      # class-level (in __init__)
-```
-
-### Exception Handling
-All public methods and async handlers must catch and log exceptions. Handlers return `False` (not raise) on failure so the consumer can try the next handler:
-```python
-try:
-    ...
-except Exception as e:
-    self.logger.error(f"操作失败: {e}")
-    return False
-```
-
-Use `self.logger.opt(exception=True).error(...)` when you need the full traceback:
-```python
-self.logger.opt(exception=True).error(f"[核销] GSX查询失败: {e}")
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
-```
+### 常量命名
+模块级常量使用全大写：`DEFAULT_DB_PATH`, `DEFAULT_TOKEN_WINDOW`, `ZIP_SIGNATURE`
 
 ---
 
 ## Structural Conventions
 
-<<<<<<< HEAD
-### Type Annotations
-All function signatures use full type annotations. `from __future__ import annotations` is used in UI files:
+### 返回值统一格式
+业务方法统一返回 `dict`，包含 `success` 字段：
 ```python
-from __future__ import annotations
-from typing import Optional, List, Dict, Any, Callable, Type
-
-def sync_shop(
-    self,
-    shop_id: int,
-    shop_db_id: int,
-    user_id: str,
-    is_full_sync: bool = False,
-    progress_callback: Optional[Callable[[SyncProgress], None]] = None,
-) -> SyncProgress:
-```
-
-### Dataclasses for Data Transfer
-Progress, results, and configuration data use `@dataclass`:
-```python
-from dataclasses import dataclass
-
-@dataclass
-class SyncProgress:
-    """同步进度"""
-    total: int
-    current: int
-    success: int
-    failed: int
-    current_goods_name: str
-    cancelled: bool = False
-    phase: str = "fetching"
-```
-
-### Pydantic Models for Config Validation
-All configuration structures use `pydantic.BaseModel` with `Field`:
-```python
-from pydantic import BaseModel, Field, ConfigDict
-
-class LLMConfig(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    model_name: str = Field(default="", description="模型名称")
-    api_key: str = Field(default="", description="API密钥")
-    api_base: str = Field(default="", description="API地址")
-```
-
-### Enums for Constants
-Named constants and states use `Enum`:
-```python
-from enum import Enum
-
-class ServiceLifetime(Enum):
-    SINGLETON = "singleton"
-    TRANSIENT = "transient"
-    SCOPED = "scoped"
-```
-
----
-
-## API Response Pattern
-All service/API methods return a consistent dict with `success` bool and optional `error_msg`:
-```python
-# Success
+# 成功
 return {"success": True, "coupon_id": coupon_id, "total_quantity": total_quantity}
 
-# Failure
+# 失败
 return {"success": False, "error_msg": "优惠券不存在"}
 ```
-Callers always check `result["success"]` before accessing other fields.
 
----
-
-## Error Handling Patterns
-
-### Try/Except with Logging
-All public methods catch exceptions, log them, and return gracefully:
+### 异常处理模式
+所有业务方法用 `try/except Exception` 包裹，失败时记录日志并返回错误字典：
 ```python
-try:
-    with db_manager.get_session() as session:
-        # ... operation
+def some_method(self) -> Dict[str, Any]:
+    try:
+        # 业务逻辑
         return {"success": True, ...}
-except Exception as e:
-    self.logger.error(f"操作失败: {str(e)}")
-    return {"success": False, "error_msg": str(e)}
+    except Exception as e:
+        self.logger.error(f"操作失败: {str(e)}")
+        return {"success": False, "error_msg": str(e)}
 ```
 
-### Graceful Degradation
-When LLM/external API calls fail, always fall back to a simpler implementation:
+### 数据类用于验证结果
+使用 `@dataclass` 封装验证结果，避免裸字典：
 ```python
-except Exception as e:
-    logger.error(f"LLM调用失败: {e}")
-    return self._format_basic_info(list_product, detail_product)  # fallback
+@dataclass
+class ValidationResult:
+    is_valid: bool
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    suggestions: List[str] = None
+    file_info: Dict = None
+
+    def __post_init__(self):
+        if self.suggestions is None:
+            self.suggestions = []
 ```
 
-### Custom Exception Hierarchy
-Domain-specific errors subclass a base exception class:
-```python
-class ConfigError(Exception): pass
-class ConfigFileNotFoundError(ConfigError): pass
-class ConfigParseError(ConfigError): pass
-class ConfigValidationError(ConfigError): pass
-=======
-### Handler Pattern (Chain of Responsibility)
-All message handlers extend `BaseHandler` → `MessageHandler`. Implement exactly two methods:
+### 继承链
+- 处理器：`MessageHandler` → `BaseHandler` → 具体处理器
+- 验证器：`FileValidator` → `ExcelValidator`（调用 `super().validate_basic()` 后扩展）
+- API 管理器：`BaseRequest` → `VoucherManager`
+- Agent：`Bot` → `CustomerAgent`
 
-```python
-class MyHandler(BaseHandler):
-    def can_handle(self, context: Context) -> bool:
-        """Fast check — no side effects, no I/O"""
-        return context.type == ContextType.TEXT
+---
 
-    async def handle(self, context: Context, metadata: Dict[str, Any]) -> bool:
-        """Return True = handled (stops chain). Return False = pass to next handler."""
-        ...
+## Logging Pattern
+
+统一使用 Loguru，每个类在 `__init__` 中获取 logger：
+```python
+from utils.logger_loguru import get_logger
+
+class MyClass:
+    def __init__(self):
+        self.logger = get_logger("MyClass")
 ```
 
-`metadata` carries: `shop_id`, `user_id`, `from_uid`, `user_key`.
-
-### Tool Registration Pattern
-Tools use the `@agent_tool` decorator with a Pydantic `BaseModel` for parameters. Import the tool module in `customer_agent.py` to trigger registration:
-
+模块级 logger（非类方法中使用）：
 ```python
-from pydantic import BaseModel, Field
-from Agent.CustomerAgent.custom.tool_decorator import agent_tool
+logger = get_logger("CustomerAgent")
+```
 
-class MyToolParams(BaseModel):
-    shop_id: str = Field(description="店铺ID")
-    query: str = Field(description="搜索关键词")
+日志级别使用规范：
+- `logger.info(f"操作成功: {detail}")` — 正常业务流程
+- `logger.error(f"操作失败: {str(e)}")` — 异常捕获
+- `logger.warning(f"达到上限 {limit}，强制结束")` — 警告
+- `logger.debug(f"注册服务: {key}")` — 调试信息
 
-@agent_tool(
-    name="my_tool_name",
-    description="工具功能描述（会传给 LLM）",
-    param_model=MyToolParams,
+---
+
+## Dependency Injection Patterns
+
+### 服务注册（在 configure_standard_services 中）
+```python
+container.register_singleton(
+    MyService,
+    factory=lambda: MyService()
 )
-def my_tool(params: MyToolParams) -> str:
-    ...
 ```
 
-Tool functions receive a single validated Pydantic model instance and return a string result.
-
-### DI Container Usage
-Register singletons in `core/di_container.py` → `configure_standard_services()`. Retrieve via `container.get(ServiceType)`:
-
+### 服务获取（通过 DI 代理）
 ```python
-from core.di_container import container
+# database/__init__.py 中定义代理
+from core.service_providers import _create_proxy
 from database.db_manager import DatabaseManager
+db_manager = _create_proxy(DatabaseManager)
 
-db = container.get(DatabaseManager)
+# 其他模块直接导入使用
+from database import db_manager
+db_manager.get_session()
 ```
 
-Legacy imports continue to work via `_DIProxy` — `from database import db_manager` still resolves through DI without modification.
-
-For new handlers that need a DI service but want a fallback:
+### 避免循环依赖
+使用延迟导入（lazy import）：
 ```python
-try:
-    from core.di_container import container
-    from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
-    bot = container.get(CustomerAgent)
-except Exception as e:
-    get_logger("Handler").warning(f"从DI容器获取失败: {e}, 将使用无Bot模式")
-```
-
-### Lazy Imports to Avoid Circular Dependencies
-Use deferred imports inside functions/methods instead of top-level imports when importing between major modules (Channel, Agent, Message, database):
-
-```python
-async def _send(self, ...):
-    from Channel.pinduoduo.utils.API.send_message import SendMessage  # lazy
-    sender = SendMessage(shop_id, user_id)
-```
-
-### Module `__init__.py` Exports
-Package `__init__.py` files should expose a clean public API using `__all__` and re-export the most commonly used names:
-
-```python
-from .base import BaseHandler
-from .ai_handler import AIReplyHandler
-
-__all__ = ['BaseHandler', 'AIReplyHandler']
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
+def some_method(self):
+    from some.module import SomeClass  # 在方法内部导入
+    return SomeClass()
 ```
 
 ---
 
-<<<<<<< HEAD
-## Dependency Injection Pattern
+## Database Patterns
 
-Services are obtained from the global DI container, not instantiated directly:
-```python
-from core.di_container import container
-from database.knowledge_service import KnowledgeService
-
-# In UI/service __init__:
-self.knowledge_service: KnowledgeService = container.get(KnowledgeService)
-```
-
-Services are registered once in `app.py` via `configure_standard_services(config)`. New services must be registered there before use:
-```python
-from core.di_container import container
-container.register_singleton(MyService, factory=lambda: MyService())
-```
-
-The DI container uses double-checked locking for thread-safe singleton creation.
-=======
-## Naming Conventions
-
-- Classes: `PascalCase` — `CustomerAgent`, `VoucherDetectionHandler`
-- Functions/methods: `snake_case` — `can_handle`, `async_reply`
-- Private helpers: `_snake_case` prefix — `_extract_imei`, `_do_verify`, `_send`
-- Constants: `UPPER_SNAKE_CASE` — `TOOL_REGISTRY`, `_VOUCHER_SUCCESS`
-- Logger names: match class or module name — `get_logger("VoucherDetectionHandler")`
-- Log prefixes for domain isolation: `[核销]`, `[GSX]`, `[AI]` — makes grep filtering easy
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
-
----
-
-## Thread Safety Patterns
-
-<<<<<<< HEAD
-### RLock for Shared State
-All shared mutable state uses `threading.RLock`:
-```python
-self._lock = threading.RLock()
-
-def get(self, key: str) -> Any:
-    with self._lock:
-        # access shared state
-```
-
-### threading.Event for Cancellation
-Long-running background tasks use `threading.Event` for cancellation:
-```python
-self._cancellation_event = threading.Event()
-
-def cancel(self): self._cancellation_event.set()
-def is_cancelled(self): return self._cancellation_event.is_set()
-def _reset_cancellation(self): self._cancellation_event.clear()
-```
-
-### QThread for Long-Running Async Work
-Background operations that call `asyncio` code from Qt use `QThread` with a fresh event loop:
-```python
-class SyncWorker(QThread):
-    progress_updated = pyqtSignal(int, int, int, str, str)
-    sync_finished = pyqtSignal(int, int, bool)
-
-    def run(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        result = loop.run_until_complete(self.service.async_method(...))
-        loop.close()
-        self.sync_finished.emit(result.success, result.failed, result.cancelled)
-```
-=======
-Pydantic v2 is used throughout. Key patterns:
+### SQLAlchemy ORM 模型规范
+- 每个模型类有中文 docstring 说明用途
+- 所有 Column 必须有 `comment` 参数
+- 时间字段统一使用 `default=datetime.now` 和 `onupdate=datetime.now`
+- 唯一约束使用 `__table_args__` 中的 `UniqueConstraint`
+- 关联关系使用 `relationship` 并指定 `back_populates` 或 `backref`
 
 ```python
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+class ProductKnowledge(Base):
+    """产品知识表，存储LLM提取的商品详细知识"""
+    __tablename__ = 'product_knowledge'
 
-class MyConfig(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    name: str = Field(default="", description="描述")
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    shop_id = Column(Integer, ForeignKey('shops.id', ondelete='CASCADE'),
+                     nullable=False, comment='店铺ID')
+    created_at = Column(DateTime, default=datetime.now, comment='创建时间')
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now,
+                        comment='更新时间')
 
-    @field_validator('name')
-    @classmethod
-    def validate_name(cls, v: str) -> str:
-        ...
+    __table_args__ = (
+        UniqueConstraint('shop_id', 'goods_id', name='uix_product_knowledge_shop_goods'),
+    )
 ```
 
-- Always add `description=` to `Field()` for tool parameter models (LLM uses these)
-- Use `Optional[str] = None` for nullable fields
-- Context, config models, queue models, and tool params all use Pydantic
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
-
----
-
-## Async Patterns
-
-<<<<<<< HEAD
-### asyncio.Semaphore for Concurrency Control
-Concurrent async tasks use a semaphore to avoid rate-limiting:
-```python
-max_concurrent = 3
-semaphore = asyncio.Semaphore(max_concurrent)
-
-async def process_with_semaphore(item):
-    async with semaphore:
-        if not self.is_cancelled():
-            await process_single(item)
-
-tasks = [process_with_semaphore(item) for item in items]
-await asyncio.gather(*tasks)
-```
-
-### Rate Limiting Delays
-Add `await asyncio.sleep(self.request_delay)` after external API calls to avoid throttling.
-
----
-
-## Database Access Pattern
-
-Always use the context manager form of `db_manager.get_session()`:
+### Session 使用模式
 ```python
 with db_manager.get_session() as session:
     obj = session.query(Model).filter_by(field=value).first()
@@ -403,231 +189,195 @@ with db_manager.get_session() as session:
     session.commit()
 ```
 
-Use `session.flush()` when you need the auto-generated ID before `commit()`:
-```python
-session.add(voucher)
-session.flush()  # populate voucher.id
-log.voucher_id = voucher.id
-session.add(log)
-=======
-### Thread-blocking Operations
-Use `asyncio.to_thread()` for blocking I/O (HTTP API calls, DB operations in sync code):
-
-```python
-result = await asyncio.to_thread(self._query_and_verify, sn, coupon_no, ...)
-```
-
-### Database Access
-Always use the context manager `session_scope()` for database operations. Never hold sessions across awaits:
-
-```python
-from database import db_manager
-
-with db_manager.session_scope() as session:
-    order = session.query(Order).filter_by(id=order_id).first()
-    order.status = 1
-    session.flush()
-```
-
-### Semaphore for Concurrency
-Use `asyncio.Semaphore` in consumers to cap concurrent message processing:
-```python
-self.semaphore = asyncio.Semaphore(max_concurrent)
-async with self.semaphore:
-    await self._process_message(wrapper)
-```
-
-### Task Lifecycle Tracking
-Track tasks with a set and `done_callback` to enable graceful shutdown:
-```python
-task = asyncio.create_task(self._process(wrapper))
-self._tasks.add(task)
-task.add_done_callback(self._tasks.discard)
-```
-
 ---
 
-## Config Access
+## Configuration Patterns
 
-Use dot-notation via the global `config` instance:
+### 访问配置
 ```python
 from config import config
 
-api_key = config.get("llm.api_key", "")
-config.set("llm.api_key", new_value, save=True)
+# 点号分隔嵌套访问
+api_key = config.get("llm.api_key")
+db_path = config.get("db_path", "./temp/channel_shop.db")
+
+# 获取 Pydantic 验证后的模型
+cfg = config.get_model()  # 返回 ConfigModel
 ```
 
-For batch updates with rollback support:
+### Pydantic 配置模型（v2 API）
 ```python
-with config.atomic_update():
-    config.set("llm.api_key", key, save=False)
-    config.set("llm.model_name", model, save=False)
-# saves automatically on context exit
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
-```
+from pydantic import BaseModel, Field, ConfigDict
 
----
-
-<<<<<<< HEAD
-## UI Patterns (PyQt6 + qfluentwidgets)
-
-### Lazy Loading
-Tab contents are only loaded on first activation using boolean flags:
-```python
-self._product_loaded = False
-self._cs_loaded = False
-
-def _on_tab_changed(self, index):
-    if index == 0 and not self._product_loaded:
-        self._load_product_data()
-        self._product_loaded = True
-```
-
-### Signals for Progress Reporting
-QThread workers emit typed pyqtSignals; UI slots update widgets:
-```python
-# Worker
-self.progress_updated.emit(current, total, success, name, phase)
-
-# UI connection
-worker.progress_updated.connect(self._on_progress)
-worker.sync_finished.connect(self._on_finished)
-```
-
-### InfoBar for User Feedback
-Use qfluentwidgets `InfoBar` for notifications instead of `QMessageBox` for non-blocking feedback:
-```python
-from qfluentwidgets import InfoBar, InfoBarPosition
-
-InfoBar.success("同步完成", f"成功 {n} 个", parent=self, duration=3000,
-                position=InfoBarPosition.TOP)
-InfoBar.error("同步失败", str(e), parent=self)
-```
-
-### Import TYPE_CHECKING to Avoid Circular Imports
-UI and service files use `TYPE_CHECKING` guard for type hints:
-```python
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from database.knowledge_service import KnowledgeService
-=======
-## Sending Replies
-
-All handlers send replies via `SendMessage` from `Channel.pinduoduo.utils.API.send_message`. Always check the result:
-
-```python
-from Channel.pinduoduo.utils.API.send_message import SendMessage
-
-result = SendMessage(shop_id, user_id).send_text(from_uid, reply_text)
-success = isinstance(result, dict) and result.get("success", False)
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
+class LLMConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_name: str = Field(default="", description="模型名称")
+    api_key: str = Field(default="", description="API密钥")
 ```
 
 ---
 
-<<<<<<< HEAD
-## Config Access Patterns
+## Async Patterns
 
-Use the global `config` singleton with dot-notation for nested keys:
+### Agent 异步初始化（延迟初始化模式）
 ```python
-from config import get_config
+class CustomerAgent(Bot):
+    def __init__(self):
+        self._is_initialized = False
+        self._llm_client: Optional[LLMClient] = None  # 延迟初始化
 
-model_name = get_config("llm.model_name", "gpt-4o")
-api_key = get_config("llm.api_key", "")
+    async def async_reply(self, query: str, context: Context = None) -> Reply:
+        if not self._is_initialized:
+            if not await self.initialize_async():
+                return Reply(ReplyType.TEXT, "初始化失败")
+        # 业务逻辑
 ```
 
-For typed access use `get_validated_config()`:
+### 并行工具执行
 ```python
-from config import get_validated_config
-cfg = get_validated_config()  # returns ConfigModel
+tool_results = await self._tool_executor.execute_parallel(
+    response.tool_calls, dependencies
+)
 ```
 
-For atomic multi-key updates:
+### 线程安全（RLock）
 ```python
-from config import config
-with config.atomic_update():
-    config.set("llm.api_key", new_key, save=False)
-    config.set("llm.model_name", new_model, save=False)
-# saved atomically on context exit
-=======
-## Frequently Used Idioms
+self._lock = threading.RLock()
 
-### Extract user info from Context
-```python
-shop_id = metadata.get("shop_id")
-user_id = metadata.get("user_id")
-from_uid = metadata.get("from_uid")
-
-if not all([shop_id, user_id, from_uid]):
-    self.logger.warning("缺少必要参数")
-    return False
-```
-
-### Session ID construction
-```python
-session_id = f"{context.channel_type.value}{context.kwargs.user_id}"
-# e.g. "pinduoduo123456789"
-```
-
-### Guard against double-initialization
-```python
-if self._is_initialized:
-    return True
-# ... initialize ...
-self._is_initialized = True
-```
-
-### Enum `__str__` override
-All enums in this codebase override `__str__` to return `.value` for clean serialization:
-```python
-class ChannelType(str, Enum):
-    PINDUODUO = "pinduoduo"
-    def __str__(self):
-        return self.value
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
+def thread_safe_method(self):
+    with self._lock:
+        # 临界区操作
 ```
 
 ---
 
-<<<<<<< HEAD
-## File & Path Handling
+## Bridge / Context Patterns
 
-Use `pathlib.Path` throughout, not `os.path`:
+### 创建拼多多上下文
+```python
+context = Context.create_pinduoduo_context(
+    content=message_text,
+    msg_id=msg_id,
+    from_uid=from_uid,
+    shop_id=shop_id,
+    user_msg_type=ContextType.TEXT,
+    channel_type=ChannelType.PINDUODUO,
+)
+```
+
+### 从 Context 提取用户信息
+```python
+from_uid = getattr(context.kwargs, "from_uid", None)
+shop_id = getattr(context.kwargs, "shop_id", None)
+```
+
+---
+
+## File & Path Patterns
+
+### 路径使用 pathlib.Path
 ```python
 from pathlib import Path
-path = Path(file_path)
-if not path.exists(): ...
-size = path.stat().st_size
+
+spec_file = Path("scripts/agent_customer.spec")
+if not spec_file.exists():
+    raise FileNotFoundError(f"找不到 spec 文件: {spec_file}")
 ```
 
-For PyInstaller frozen-exe support, always use the runtime path helper:
+### 支持 PyInstaller 打包后的路径
 ```python
-if getattr(sys, 'frozen', False):
-    root = Path(sys._MEIPASS).parent
-else:
-    root = Path(__file__).resolve().parent
+def get_project_root():
+    if getattr(sys, 'frozen', False):
+        return Path(sys._MEIPASS).parent
+    return Path(__file__).resolve().parent
+```
+
+### 原子文件写入
+```python
+temp_path = self.config_path.with_suffix('.tmp')
+with open(temp_path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, ensure_ascii=False, indent=4)
+temp_path.replace(self.config_path)  # 原子重命名
+```
+
+---
+
+## Tool Registration Pattern（Agent 工具）
+
+工具通过 `@agent_tool` 装饰器注册，在 `customer_agent.py` 中通过导入触发注册：
+```python
+# tools/search_customer_service_knowledge.py
+from Agent.CustomerAgent.custom.tool_decorator import agent_tool
+
+@agent_tool
+def search_customer_service_knowledge(query: str, shop_id: str) -> str:
+    """搜索客服知识库"""
+    ...
+
+# customer_agent.py 中导入触发注册
+from Agent.CustomerAgent.tools import search_customer_service_knowledge  # noqa: F401
+```
+
+获取已注册工具列表：
+```python
+from Agent.CustomerAgent.custom.tool_decorator import get_tools_for_llm
+tools = get_tools_for_llm()
 ```
 
 ---
 
 ## Naming Conventions
 
-| Element | Convention | Example |
-|---------|-----------|---------|
-| Classes | PascalCase | `ProductSyncService`, `DIContainer` |
-| Methods/functions | snake_case | `sync_shop`, `get_voucher_code` |
-| Private methods | `_snake_case` | `_generate_coupon_id`, `_reset_cancellation` |
-| Constants | UPPER_SNAKE | `ZIP_SIGNATURE`, `SUPPORTED_EXTENSIONS` |
-| Module-level loggers | `logger` | `logger = get_logger("ModuleName")` |
-| Type aliases | snake_case | `progress_callback` |
-| Config keys | dot-separated strings | `"llm.api_key"`, `"gsx.appid"` |
-=======
-## Anti-patterns to Avoid
+| 类型 | 规范 | 示例 |
+|------|------|------|
+| 类名 | PascalCase | `CustomerAgent`, `VoucherManager` |
+| 方法/函数 | snake_case | `get_voucher_code`, `verify_voucher` |
+| 私有方法 | `_snake_case` | `_generate_coupon_id`, `_calculate_discount` |
+| 常量 | UPPER_SNAKE_CASE | `DEFAULT_MAX_LOOPS`, `ZIP_SIGNATURE` |
+| 模块文件 | snake_case | `voucher_manager.py`, `di_container.py` |
+| 数据库表名 | snake_case 复数 | `product_knowledge`, `voucher_logs` |
+| 唯一约束名 | `uix_表名_字段` | `uix_product_knowledge_shop_goods` |
 
-- Do NOT use `print()` — always use the logger
-- Do NOT import between sibling modules at the top level if it creates circular dependencies — use lazy imports inside functions
-- Do NOT hold SQLAlchemy sessions across `await` boundaries — keep sessions synchronous and use `asyncio.to_thread` if needed
-- Do NOT skip `can_handle()` logic — keep it pure and fast with no side effects
-- Do NOT register the same service twice in DI — always guard with `container.is_registered()`
-- Do NOT create new `asyncio` event loops from async context — use `asyncio.to_thread` instead
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
+---
+
+## Import Order Convention
+
+```python
+# 1. 标准库
+import sys
+import threading
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+# 2. 第三方库
+from pydantic import BaseModel, Field
+from sqlalchemy import Column, Integer, String
+
+# 3. 本项目模块（按层级：core → database → bridge → Agent → utils）
+from config import config
+from database import db_manager
+from bridge.context import Context
+from utils.logger_loguru import get_logger
+```
+
+---
+
+## Error Handling Hierarchy
+
+```
+ConfigError (基类)
+├── ConfigFileNotFoundError
+├── ConfigParseError
+└── ConfigValidationError
+```
+
+自定义异常继承自具体业务基类，不直接继承 `Exception`。
+
+---
+
+## Windows-Specific Considerations
+
+- 文件编码：读写文件统一使用 `encoding='utf-8'`，Windows bat 文件使用 `encoding='gbk'`
+- 控制台编码：脚本入口设置 `kernel32.SetConsoleOutputCP(65001)`
+- 路径分隔符：统一使用 `pathlib.Path`，避免硬编码 `\\`
+- subprocess：Windows 上指定 `encoding='utf-8'` 避免 Unicode 问题

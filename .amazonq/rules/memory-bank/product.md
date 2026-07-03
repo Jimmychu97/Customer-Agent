@@ -1,119 +1,49 @@
 # Product Overview: Agent-Customer
 
-## Purpose & Value Proposition
+## Purpose
+电商AI客服桌面应用程序，专为拼多多平台设计。通过 WebSocket 实时接收买家消息，集成 AI 大模型实现智能自动回复，减少人工客服工作量。
 
-<<<<<<< HEAD
-Agent-Customer is an AI-powered e-commerce customer service desktop application built with PyQt6. It targets Chinese e-commerce operators on the Pinduoduo (PDD) platform, automating customer interactions via AI to reduce manual support load while maintaining response quality.
-=======
-Agent-Customer is a Windows desktop application for e-commerce AI customer service, specifically targeting the Pinduoduo (拼多多) platform. It automates customer support by combining real-time WebSocket message receiving with an AI agent that can intelligently respond to customers, query product knowledge, and handle post-sale workflows.
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
+## Value Proposition
+- 7×24 小时 AI 自动回复，降低人工客服成本
+- 双知识库体系确保回复准确性（客服知识库 + 产品知识库）
+- GSX 验机报告自动查询与发送，提升售后效率
+- 支持多账号并发，适合中大型电商卖家
 
-The core value is reducing manual customer service workload while maintaining quality through: AI-powered auto-replies, dual knowledge base retrieval, GSX device inspection integration, and keyword-triggered escalation to human agents.
+## Key Features
 
-<<<<<<< HEAD
-- **Real-time Messaging**: WebSocket integration with Pinduoduo platform for live message reception and response
-- **AI Auto-Reply**: Custom-built Agent framework (no Agno dependency) with multi-turn tool calling and session context management
-- **Dual Knowledge Base**: Customer service KB (pre/post-sale, product Q&A) + Product KB (LLM-extracted from PDD API data)
-- **Product Knowledge Auto-Sync**: Fetches product list from PDD API, uses multimodal LLM to extract and store product knowledge
-- **GSX Verification**: Auto-queries GSX inspection reports after voucher redemption, generates summaries sent to users
-- **Proactive Recommendations**: Agent can fetch product lists and send product cards to users
-- **Keyword-Based Transfer**: Automatically detects user intent and triggers transfer to human agents
-- **Async Message Queue**: High-concurrency message processing via async queue + handler chain
-- **Auto-Reconnect**: WebSocket heartbeat detection and automatic reconnection
+### 核心功能
+- **实时消息接收**：拼多多平台 WebSocket 连接，支持断线自动重连和心跳检测
+- **AI 智能回复**：自研 Agent 框架，多轮工具调用 + 会话上下文管理
+- **双知识库**：客服知识库（售前/售后/商品解答）+ 产品知识库（LLM多模态提取）
+- **商品知识自动同步**：从拼多多 API 拉取商品，调用多模态 LLM 提取产品知识入库
+- **GSX 验机查询**：核销完成后自动调用 GSX 接口查询验机报告并生成简析
+- **关键词转人工**：自动识别用户意图，关键词触发转人工服务
+- **AI 主动推荐**：客服代理可主动获取商品列表、发送商品卡片给用户
 
-## AI Agent Tools
+### AI Agent 工具集
+| 工具 | 功能 |
+|------|------|
+| `search_customer_service_knowledge` | 搜索客服知识库（售前咨询、商品解答、售后政策） |
+| `get_product_knowledge` | 查询指定商品详细知识（成分、规格、用法、价格） |
+| `get_shop_products` | 获取店铺商品列表 |
+| `send_goods_link` | 向用户发送商品卡片链接 |
+| `transfer_conversation` | 转接会话给人工客服 |
 
-| Tool | Description |
-|------|-------------|
-| `search_customer_service_knowledge` | Search CS knowledge base (pre-sale, product Q&A, after-sale policies) |
-| `get_product_knowledge` | Query detailed product knowledge (ingredients, specs, usage, price) |
-| `get_shop_products` | Retrieve shop product list |
-| `send_goods_link` | Send product card link to user |
-| `transfer_conversation` | Transfer session to human agent |
-
-## Target Users & Use Cases
-
-- **Primary**: E-commerce shop owners/operators on Pinduoduo managing customer service
-- **Use Cases**:
-  - Automated 24/7 customer inquiry handling
-  - Product information delivery
-  - Post-sale support automation
-  - GSX device inspection report delivery
-  - Voucher/coupon management
-  - Escalation to human agents when needed
-
-## Configuration Requirements
-
-| Config | Purpose | Required |
-|--------|---------|----------|
-| `llm.api_base` | LLM API endpoint (OpenAI-compatible) | ✅ |
-| `llm.api_key` | LLM API key | ✅ |
-| `llm.model_name` | Model name (e.g., `deepseek-chat`) | ✅ |
-| `gsx.appid` / `gsx.secret` | GSX inspection platform credentials | ✅ |
-| `business_hours.enabled` | Toggle AI auto-reply on/off | Optional |
-| `prompt.instructions` | AI behavior instructions | Optional |
-
-## Supported LLM Providers
-
-Any OpenAI-compatible API: DeepSeek, Doubao (Volcengine), Kimi (Moonshot), and others.
-=======
-## Key Features & Capabilities
-
-### Message Handling
-- Real-time WebSocket connection to Pinduoduo merchant workbench
-- Async message queue with handler chain (preprocessor → AI/keyword/voucher handlers)
-- Auto-reconnect with heartbeat detection
-- Business hours enforcement (default 08:00–23:00)
-
-### AI Agent
-- Custom-built Agent framework (not Agno-based)
-- Multi-turn tool calling with session context management
-- OpenAI-compatible API (supports DeepSeek, Doubao, Kimi, etc.)
-- Proactive product recommendation (agent can fetch and send product cards)
-
-### Knowledge Base (Dual System)
-- Customer service knowledge base: pre-sale/post-sale/FAQ answers (jieba-segmented search)
-- Product knowledge base: auto-extracted from Pinduoduo product list via multimodal LLM
-
-### Agent Tools
-
-| Tool | Function |
-|------|----------|
-| `search_customer_service_knowledge` | Search CS knowledge base (pre-sale, post-sale, FAQ) |
-| `get_product_knowledge` | Get detailed product info (ingredients, specs, usage, price) |
-| `get_shop_products` | Fetch shop product list |
-| `send_goods_link` | Send product card to customer |
-| `transfer_conversation` | Escalate to human agent |
-| `verify_voucher` / `use_voucher` | Voucher verification and redemption |
-| `coupon_query` | Query coupon information |
-| `get_voucher_code` | Retrieve voucher codes |
-
-### Integrations
-- **GSX (gkdt.com)**: Device inspection report query — auto-triggered after voucher redemption
-- **Pinduoduo Open API**: Product list sync, order/conversation management
-- **Playwright**: Automated Pinduoduo login and cookie refresh (Chromium)
-
-### UI (PyQt6 + pyqt6-fluent-widgets)
-- Account management (add/login PDD accounts)
-- Auto-reply control panel (start/stop per account)
-- Product management with SKU sync and GSX ServerId mapping
-- Knowledge base management (CS knowledge + product knowledge)
-- Keyword management (trigger human handoff)
-- Voucher management UI
-- Settings page (LLM config, GSX config, business hours, prompt instructions)
-- Log viewer
+### 消息处理链
+1. **预处理器**（preprocessor）：消息过滤、格式化
+2. **关键词处理器**（keyword_handler）：关键词匹配转人工
+3. **核销处理器**（voucher_handler）：卡券核销 + GSX 验机
+4. **AI 处理器**（ai_handler）：调用 Agent 生成回复
 
 ## Target Users
+- 拼多多平台中大型电商卖家
+- 需要 7×24 小时客服覆盖的店铺
+- 销售需要验机服务商品（如二手手机）的卖家
 
-- Small-to-medium Pinduoduo merchants who want to automate customer service
-- Shop owners needing AI-assisted pre-sale consultation and post-sale support
-- Operations teams managing multiple PDD accounts simultaneously
+## Supported Platforms
+- LLM：任何 OpenAI 兼容接口（DeepSeek、豆包、Kimi 等）
+- 操作系统：Windows
+- 电商平台：拼多多（Pinduoduo）
 
-## Use Cases
-
-1. Automated pre-sale Q&A (product info, pricing, specs) using knowledge base
-2. Post-sale handling (return policy, logistics status) via CS knowledge base
-3. GSX device inspection report auto-delivery after voucher redemption
-4. Keyword detection → automatic human agent escalation
-5. Proactive product recommendations from shop catalog
->>>>>>> 528dddd363ca2635fa7b3e6e91cccb41ce7054bc
+## Version
+当前版本：1.1.0
