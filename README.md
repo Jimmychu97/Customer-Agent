@@ -72,7 +72,9 @@ uv sync
 ### 第五步：安装 Playwright 浏览器
 
 > **必须执行**，用于拼多多账号自动登录和 Cookie 刷新，缺少此步骤将导致 WebSocket 无法收到消息。
-
+``` 
+ 如果安装不行就执行这个.
+.venv\Scripts\python.exe -m playwright install chromium
 ```bash
 uv run playwright install chromium
 ```
