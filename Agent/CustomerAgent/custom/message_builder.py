@@ -145,6 +145,7 @@ class MessageBuilder:
         query: str,
         history: List[Dict[str, Any]],
         dependencies: Dict[str, Any] = None,
+        context: Any = None,
     ) -> List[Dict[str, Any]]:
         """
         构建 LLM 消息列表
@@ -199,6 +200,29 @@ class MessageBuilder:
             else:
                 messages.append({"role": role, "content": content})
 
-        # 当前用户消息
-        messages.append({"role": "user", "content": query})
+        # 当前用户消息（支持图片多模态）
+        from bridge.context import ContextType
+        if context and context.type == ContextType.IMAGE:
+            logger.info(f"[图片消息] 构建多模态消息, URL={query}")
+            messages.append({"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": query}},
+                {"type": "text", "text": "请识别图片中的序列号、IMEI码或卡券详情的卡券码，提取后按客服流程处理。"},
+            ]})
+        else:
+            messages.append({"role": "user", "content": query})
         return messages
+
+    def _fetch_image_base64(self, url: str) -> str:
+        """下载图片并转为 base64 data URI，失败则返回原 URL"""
+        try:
+            import requests
+            import base64
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            mime = resp.headers.get("Content-Type", "image/jpeg").split(";")[0]
+            b64 = base64.b64encode(resp.content).decode()
+            logger.info(f"[图片消息] 下载成功, size={len(resp.content)}, mime={mime}")
+            return f"data:{mime};base64,{b64}"
+        except Exception as e:
+            logger.warning(f"[图片消息] 下载失败，回退到原URL: {e}")
+            return url

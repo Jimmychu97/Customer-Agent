@@ -189,7 +189,7 @@ class CustomerAgent(Bot):
             )
 
             # 构建 messages
-            messages = self._message_builder.build_messages(query, history, dependencies)
+            messages = self._message_builder.build_messages(query, history, dependencies, context)
 
             # 执行 Agent 循环
             final_content = await self._run_agent_loop(messages, dependencies)

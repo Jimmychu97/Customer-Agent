@@ -58,6 +58,13 @@ class ZhenxinApiConfig(BaseModel):
     apikey: str = Field(default="", description="API 密钥")
 
 
+class VLLMConfig(BaseModel):
+    """多模态图片识别 LLM 配置（千问 VL 等）"""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_name: str = Field(default="", description="模型名称")
+    api_key: str = Field(default="", description="API密钥")
+    api_base: str = Field(default="", description="API地址")
+
 
 class ConfigModel(BaseModel):
     """配置模型"""
@@ -77,6 +84,10 @@ class ConfigModel(BaseModel):
     pdd_open: PddOpenConfig = Field(
         default_factory=PddOpenConfig,
         description="拼多多开放平台配置"
+    )
+    vl_llm: VLLMConfig = Field(
+        default_factory=VLLMConfig,
+        description="多模态图片识别LLM配置"
     )
     gsx: GsxConfig = Field(
         default_factory=GsxConfig,
@@ -104,6 +115,11 @@ config_base = {
         "client_id": "",
         "client_secret": "",
         "access_token": ""
+    },
+    "vl_llm": {
+        "model_name": "",
+        "api_key": "",
+        "api_base": ""
     },
     "gsx": {
         "appid": "",

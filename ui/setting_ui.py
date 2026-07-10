@@ -83,6 +83,62 @@ class LLMConfigCard(CardWidget):
         self.model_name_edit.setText(config.get("model_name", ""))
 
 
+class VLLMConfigCard(CardWidget):
+    """图片识别 LLM 配置卡片（支持多模态的可识图 AI）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setupUI()
+
+    def setupUI(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(16)
+
+        title_label = StrongBodyLabel("图片识别 AI 配置（可识图模型）")
+        title_label.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
+        layout.addWidget(title_label)
+
+        form_layout = QFormLayout()
+        form_layout.setSpacing(12)
+        form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        form_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form_layout.setFormAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self.api_base_edit = LineEdit()
+        self.api_base_edit.setPlaceholderText("如 https://dashscope.aliyuncs.com/compatible-mode/v1")
+        form_layout.addRow("API Base URL:", self.api_base_edit)
+
+        self.api_key_edit = PasswordLineEdit()
+        self.api_key_edit.setPlaceholderText("输入可识图模型的 API Key")
+        form_layout.addRow("API Key:", self.api_key_edit)
+
+        self.model_name_edit = LineEdit()
+        self.model_name_edit.setPlaceholderText("如：qwen-vl-plus、qwen-vl-max")
+        form_layout.addRow("模型名称:", self.model_name_edit)
+
+        layout.addLayout(form_layout)
+
+        desc = CaptionLabel(
+            "用于识别用户发送的图片（如序列号、卡券照片等）。\n"
+            "支持任何 OpenAI 兼容的多模态接口，推荐使用通义千问 VL 系列。"
+        )
+        desc.setStyleSheet("color: #666; padding: 8px 0;")
+        layout.addWidget(desc)
+
+    def getConfig(self) -> dict:
+        return {
+            "api_base": self.api_base_edit.text().strip(),
+            "api_key": self.api_key_edit.text().strip(),
+            "model_name": self.model_name_edit.text().strip(),
+        }
+
+    def setConfig(self, cfg: dict):
+        self.api_base_edit.setText(cfg.get("api_base", ""))
+        self.api_key_edit.setText(cfg.get("api_key", ""))
+        self.model_name_edit.setText(cfg.get("model_name", ""))
+
+
 class PromptConfigCard(CardWidget):
     """提示词配置卡片"""
 
@@ -342,11 +398,13 @@ class SettingUI(QFrame):
 
         # 创建配置卡片
         self.llm_config_card = LLMConfigCard()
+        self.vl_llm_config_card = VLLMConfigCard()
         self.prompt_config_card = PromptConfigCard()
         self.business_hours_card = BusinessHoursCard()
         self.pdd_open_config_card = PddOpenConfigCard()
 
         content_layout.addWidget(self.llm_config_card)
+        content_layout.addWidget(self.vl_llm_config_card)
         content_layout.addWidget(self.prompt_config_card)
         content_layout.addWidget(self.business_hours_card)
         content_layout.addWidget(self.pdd_open_config_card)
@@ -369,6 +427,11 @@ class SettingUI(QFrame):
         try:
             # 从配置模块获取各个配置项
             loaded_config = {
+                "vl_llm": {
+                    "api_base": config.get("vl_llm.api_base", ""),
+                    "api_key": config.get("vl_llm.api_key", ""),
+                    "model_name": config.get("vl_llm.model_name", "")
+                },
                 "llm": {
                     "api_base": config.get("llm.api_base", "https://ark.cn-beijing.volces.com/api/v3"),
                     "api_key": config.get("llm.api_key", ""),
@@ -420,10 +483,10 @@ class SettingUI(QFrame):
                 "api_key": "",
                 "model_name": "doubao-seed-1-6-flash-250828"
             }),
-            "prompt": config_data.get("prompt", {
-                "instructions": []
-            }),
-            "business_hours": config_data.get("business_hours", {"enabled": True})
+            "vl_llm": config_data.get("vl_llm", {"api_base": "", "api_key": "", "model_name": ""}),
+            "prompt": config_data.get("prompt", {"instructions": []}),
+            "business_hours": config_data.get("business_hours", {"enabled": True}),
+            "pdd_open": config_data.get("pdd_open", {}),
         }
 
         # 验证business_hours格式
@@ -437,6 +500,7 @@ class SettingUI(QFrame):
 
         # 设置到界面
         self.llm_config_card.setConfig(validated_config["llm"])
+        self.vl_llm_config_card.setConfig(validated_config.get("vl_llm", {}))
         self.prompt_config_card.setConfig(validated_config["prompt"])
 
         self.business_hours_card.setConfig({"business_hours": validated_config["business_hours"]})
@@ -455,6 +519,7 @@ class SettingUI(QFrame):
 
             new_config = {
                 "llm": llm_config,
+                "vl_llm": self.vl_llm_config_card.getConfig(),
                 "prompt": prompt_config,
                 "business_hours": business_config.get("business_hours", {"enabled": True}),
                 "pdd_open": pdd_open_config,
