@@ -6,10 +6,12 @@
 from .base import BaseHandler
 from .ai_handler import AIReplyHandler
 from .preprocessor import MessagePreprocessor, BusinessHoursHandler
+from .image_handler import ImageHandler
 
 __all__ = [
     'BaseHandler',
     'AIReplyHandler',
     'MessagePreprocessor',
     'BusinessHoursHandler',
+    'ImageHandler',
 ]

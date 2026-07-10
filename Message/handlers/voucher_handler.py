@@ -13,7 +13,7 @@ import json
 import asyncio
 from typing import Optional, Dict, Any, Tuple
 from bridge.context import Context, ContextType
-from .base import BaseHandler
+from .base import BaseHandler, send_to_user
 
 
 def _extract_imei(text: str) -> Optional[str]:
@@ -48,9 +48,24 @@ def _extract_serial(text: str) -> Optional[str]:
 
 
 def _extract_coupon(text: str) -> Optional[str]:
-    """提取拼多多卡券号（10-14位纯数字，排除15位IMEI）"""
+    """提取拼多多卡券号（10-14位纯数字，支持带空格格式如 '3560 7227 2865'，排除IMEI和手机号）"""
+    # 先尝试匹配带空格的分组数字（如 3560 7227 2865）
+    for m in re.finditer(r'(?<![\d])((\d{3,5}[\s]+){1,4}\d{3,5})(?![\d])', text):
+        candidate = re.sub(r'\s+', '', m.group(1))
+        if 10 <= len(candidate) <= 14:
+            return candidate
+    # 再匹配连续数字
     for m in re.finditer(r'(?<!\d)(\d{10,14})(?!\d)', text):
-        return m.group(1)
+        candidate = m.group(1)
+        start, end = m.start(1), m.end(1)
+        before = text[start - 1] if start > 0 else ""
+        after = text[end] if end < len(text) else ""
+        if before.isdigit() or after.isdigit():
+            continue
+        # 排除手机号（11位且以1开头）
+        if len(candidate) == 11 and candidate.startswith('1'):
+            continue
+        return candidate
     return None
 
 
@@ -135,6 +150,40 @@ def _analyze_gsx_result(data) -> str:
     return "\n".join(lines) if lines else ""
 
 
+# 每个用户的建单锁，防止并发重复建单
+_order_locks: Dict[str, asyncio.Lock] = {}
+_order_locks_lock = asyncio.Lock()
+
+# 正在核销中的用户集合（fire-and-forget 期间阻止 AI 插嘴）
+_verifying_users: set = set()
+
+
+def _has_success_order_today(shop_id: str, from_uid: str) -> bool:
+    """检查该用户今天是否已有核销成功的订单"""
+    try:
+        from database import db_manager
+        from database.models import Order
+        from datetime import datetime, timedelta
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        with db_manager.session_scope() as session:
+            return session.query(Order).filter(
+                Order.shop_id == shop_id,
+                Order.session_id == from_uid,
+                Order.status == 1,
+                Order.created_at >= today,
+            ).first() is not None
+    except Exception:
+        return False
+
+
+async def _get_order_lock(key: str) -> asyncio.Lock:
+    """获取指定用户的建单锁（懒创建）"""
+    async with _order_locks_lock:
+        if key not in _order_locks:
+            _order_locks[key] = asyncio.Lock()
+        return _order_locks[key]
+
+
 class VoucherDetectionHandler(BaseHandler):
     """
     核销自动检测处理器
@@ -172,6 +221,11 @@ class VoucherDetectionHandler(BaseHandler):
             )
             return False
 
+        # 今天已核销成功，跳过核销让 AI 处理
+        if await asyncio.to_thread(_has_success_order_today, shop_id, from_uid):
+            self.logger.info(f"[核销] 用户 {from_uid} 今天已核销成功，跳过核销流程")
+            return False
+
         self.logger.info(
             f"[核销] 提取到信息 sn={sn!r} coupon={coupon_no!r} "
             f"from_uid={from_uid} shop_id={shop_id}"
@@ -181,10 +235,12 @@ class VoucherDetectionHandler(BaseHandler):
         if coupon_no and not sn:
             final_sn, final_coupon, order_id = await self._upsert_order(sn, coupon_no, shop_id, from_uid)
             if final_sn and final_coupon:
-                # 凑齐了，触发核销
+                # 凑齐了，先告知用户识别到的卡券号，再触发核销
+                await self._send(shop_id, user_id, from_uid,
+                    f"✅ 已识别卡券号：{coupon_no}，正在核销...")
                 reply, _ = await self._do_verify(final_sn, final_coupon, shop_id, user_id, from_uid, order_id)
                 if reply:
-                    await self._send(shop_id, user_id, from_uid, reply)
+                    await self._send(shop_id, user_id, from_uid, reply, delay=1)
             else:
                 await self._send(shop_id, user_id, from_uid,
                     f"✅ 已记录您的卡券号：{coupon_no}\n"
@@ -203,10 +259,12 @@ class VoucherDetectionHandler(BaseHandler):
         if sn and not coupon_no:
             final_sn, final_coupon, order_id = await self._upsert_order(sn, coupon_no, shop_id, from_uid)
             if final_sn and final_coupon:
-                # 凑齐了，触发核销
+                # 凑齐了，先告知用户识别到的序列号，再触发核销
+                await self._send(shop_id, user_id, from_uid,
+                    f"✅ 已识别序列号：{sn}，正在核销...")
                 reply, _ = await self._do_verify(final_sn, final_coupon, shop_id, user_id, from_uid, order_id)
                 if reply:
-                    await self._send(shop_id, user_id, from_uid, reply)
+                    await self._send(shop_id, user_id, from_uid, reply, delay=1)
             else:
                 await self._send(shop_id, user_id, from_uid,
                     f"✅ 已记录您的序列号/IMEI：{sn}\n"
@@ -225,53 +283,55 @@ class VoucherDetectionHandler(BaseHandler):
 
     async def _upsert_order(
         self,
-        sn: Optional[str],
-        coupon_no: Optional[str],
+        sn,
+        coupon_no,
         shop_id: str,
         from_uid: str,
-    ) -> Tuple[str, str, Optional[int]]:
-        """建单或补全已有单
+    ):
+        """建单或补全已有单（加锁防止并发重复建单）
 
         Returns:
             (final_sn, final_coupon, order_id)
         """
-        try:
-            from database import db_manager
-            from database.models import Order
-            from datetime import datetime as dt, timedelta
+        lock = await _get_order_lock(f"{shop_id}_{from_uid}")
+        async with lock:
+            try:
+                from database import db_manager
+                from database.models import Order
+                from datetime import datetime as dt, timedelta
 
-            ten_min_ago = dt.now() - timedelta(minutes=10)
-            with db_manager.session_scope() as session:
-                order = session.query(Order).filter(
-                    Order.shop_id == shop_id,
-                    Order.session_id == from_uid,
-                    Order.status == 0,
-                    Order.created_at >= ten_min_ago,
-                ).order_by(Order.id.desc()).first()
+                ten_min_ago = dt.now() - timedelta(minutes=10)
+                with db_manager.session_scope() as session:
+                    order = session.query(Order).filter(
+                        Order.shop_id == shop_id,
+                        Order.session_id == from_uid,
+                        Order.status == 0,
+                        Order.created_at >= ten_min_ago,
+                    ).order_by(Order.id.desc()).first()
 
-                if order is None:
-                    order = Order(
-                        shop_id=shop_id,
-                        session_id=from_uid,
-                        sn_imei=sn or "",
-                        coupons=coupon_no or "",
-                        status=0,
-                    )
-                    session.add(order)
-                    session.flush()
-                    self.logger.info(f"[核销] 新建 Order sn={sn!r} coupon={coupon_no!r}")
-                else:
-                    if sn and not order.sn_imei:
-                        order.sn_imei = sn
-                    if coupon_no and not order.coupons:
-                        order.coupons = coupon_no
-                    session.flush()
-                    self.logger.info(f"[核销] 补全 Order id={order.id} sn={order.sn_imei!r} coupon={order.coupons!r}")
+                    if order is None:
+                        order = Order(
+                            shop_id=shop_id,
+                            session_id=from_uid,
+                            sn_imei=sn or "",
+                            coupons=coupon_no or "",
+                            status=0,
+                        )
+                        session.add(order)
+                        session.flush()
+                        self.logger.info(f"[核销] 新建 Order sn={sn!r} coupon={coupon_no!r}")
+                    else:
+                        if sn and not order.sn_imei:
+                            order.sn_imei = sn
+                        if coupon_no and not order.coupons:
+                            order.coupons = coupon_no
+                        session.flush()
+                        self.logger.info(f"[核销] 补全 Order id={order.id} sn={order.sn_imei!r} coupon={order.coupons!r}")
 
-                return order.sn_imei or "", order.coupons or "", order.id
-        except Exception as e:
-            self.logger.error(f"[核销] 建单失败: {e}")
-            return sn or "", coupon_no or "", None
+                    return order.sn_imei or "", order.coupons or "", order.id
+            except Exception as e:
+                self.logger.error(f"[核销] 建单失败: {e}")
+                return sn or "", coupon_no or "", None
 
     async def _do_verify(
         self,
@@ -284,20 +344,24 @@ class VoucherDetectionHandler(BaseHandler):
     ) -> Tuple[Optional[str], str]:
         """触发核销流程，核销成功后串行 await GSX查询+LLM分析"""
         self.logger.info(f"[核销] 双条件齐备，触发核销 order_id={order_id}")
-        await self._send(shop_id, user_id, from_uid, "好的，正在查询~")
-        result_text, gsx_params = await asyncio.to_thread(
-            self._query_and_verify,
-            sn, coupon_no, shop_id, user_id, from_uid, order_id
-        )
-        status = _VOUCHER_SUCCESS if result_text and "核销成功" in result_text else _VOUCHER_FAILED
-        if status == _VOUCHER_SUCCESS and gsx_params:
-            goods_id, spec, report_data, device_type = gsx_params
-            if device_type == "apple":
-                await self._query_zhenxin_and_send(sn, goods_id, spec, report_data, order_id, shop_id, user_id, from_uid, result_text)
-            else:
-                await self._query_gsx_and_send(sn, goods_id, spec, report_data, order_id, shop_id, user_id, from_uid, result_text)
-            return None, status  # 核销成功时消息已在 _query_gsx_and_send 里全部发送
-        return result_text, status
+        _verifying_users.add(from_uid)
+        try:
+            await self._send(shop_id, user_id, from_uid, "好的，正在查询~")
+            result_text, gsx_params = await asyncio.to_thread(
+                self._query_and_verify,
+                sn, coupon_no, shop_id, user_id, from_uid, order_id
+            )
+            status = _VOUCHER_SUCCESS if result_text and "核销成功" in result_text else _VOUCHER_FAILED
+            if status == _VOUCHER_SUCCESS and gsx_params:
+                goods_id, spec, report_data, device_type = gsx_params
+                if device_type == "apple":
+                    await self._query_zhenxin_and_send(sn, goods_id, spec, report_data, order_id, shop_id, user_id, from_uid, result_text)
+                else:
+                    await self._query_gsx_and_send(sn, goods_id, spec, report_data, order_id, shop_id, user_id, from_uid, result_text)
+                return None, status
+            return result_text, status
+        finally:
+            _verifying_users.discard(from_uid)
 
     def _query_and_verify(
         self,
@@ -453,14 +517,14 @@ class VoucherDetectionHandler(BaseHandler):
             # 2. LLM 分析
             analysis = await self._llm_analyze_zhenxin(report_text, session_id)
             if analysis:
-                await self._send(shop_id, user_id, from_uid, analysis)
+                await self._send(shop_id, user_id, from_uid, analysis, delay=1)
 
             # 3. 核销成功消息
             if voucher_success_text:
-                await self._send(shop_id, user_id, from_uid, voucher_success_text)
+                await self._send(shop_id, user_id, from_uid, voucher_success_text, delay=1)
 
             # 4. 固定结语
-            await self._send(shop_id, user_id, from_uid, fixed)
+            await self._send(shop_id, user_id, from_uid, fixed, delay=1)
 
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] 真心报告发送失败: {e}")
@@ -547,7 +611,7 @@ class VoucherDetectionHandler(BaseHandler):
                     await self._send(shop_id, user_id, from_uid, voucher_success_text)
                 return
 
-            gsx_key = self._get_gsx_key(goods_id, spec)
+            gsx_key = self._get_query_config(goods_id, spec).get("server_id")
             with db_manager.session_scope() as session:
                 order = session.query(Order).filter_by(id=order_id).first()
                 if order:
@@ -564,14 +628,14 @@ class VoucherDetectionHandler(BaseHandler):
             # 2. 复用 CustomerAgent LLM 客户端生成分析，结果写入会话历史
             analysis = await self._llm_analyze_gsx(gsx_text, session_id)
             if analysis:
-                await self._send(shop_id, user_id, from_uid, analysis)
+                await self._send(shop_id, user_id, from_uid, analysis, delay=1)
 
             # 3. 发送核销成功消息
             if voucher_success_text:
-                await self._send(shop_id, user_id, from_uid, voucher_success_text)
+                await self._send(shop_id, user_id, from_uid, voucher_success_text, delay=1)
 
             # 4. 发送固定结语
-            await self._send(shop_id, user_id, from_uid, fixed)
+            await self._send(shop_id, user_id, from_uid, fixed, delay=1)
 
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] GSX查询失败: {e}")
@@ -653,16 +717,10 @@ class VoucherDetectionHandler(BaseHandler):
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] 更新 Order 状态失败 order_id={order_id}: {e}")
 
-    async def _send(self, shop_id: str, user_id: str, from_uid: str, text: str) -> bool:
+    async def _send(self, shop_id: str, user_id: str, from_uid: str, text: str, delay: float = 0) -> bool:
         try:
-            from Channel.pinduoduo.utils.API.send_message import SendMessage
-            result = SendMessage(shop_id, user_id).send_text(from_uid, text)
-            success = isinstance(result, dict) and result.get("success", False)
-            if success:
-                self.logger.info(f"[核销] 发送成功 from_uid={from_uid} text={text[:30]!r}")
-            else:
-                self.logger.warning(f"[核销] 发送失败 from_uid={from_uid} result={result}")
-            return success
+            await send_to_user(shop_id, user_id, from_uid, text, delay)
+            return True
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] 发送回复失败 from_uid={from_uid}: {e}")
             return False

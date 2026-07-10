@@ -132,7 +132,15 @@ def handler_chain(use_ai=True, businessHours=None, bot=None):
     """简化版处理器链创建函数 - 包含关键词检测"""
     handlers = []
 
-    # 1. 核销自动检测（苹果序列号+拼多多卡券号双条件匹配）
+    # 1. 图片处理器（千问识别 + 路由）
+    try:
+        from .handlers.image_handler import ImageHandler
+        handlers.append(ImageHandler())
+    except Exception as e:
+        from utils.logger_loguru import get_logger
+        get_logger("handler_chain").warning(f"图片处理器加载失败: {e}")
+
+    # 2. 核销自动检测（苹果序列号+拼多多卡券号双条件匹配）
     try:
         from .handlers.voucher_handler import VoucherDetectionHandler
         handlers.append(VoucherDetectionHandler())

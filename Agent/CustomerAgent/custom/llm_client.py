@@ -14,7 +14,6 @@ except ImportError:
     raise ImportError("openai package is required: pip install openai>=1.109.1")
 
 from utils.logger_loguru import get_logger
-from utils.volcengine_models import ChatCompletionsRequest
 
 logger = get_logger("LLMClient")
 
@@ -66,7 +65,6 @@ class LLMClient:
         self._client = AsyncOpenAI(
             api_key=self.api_key,
             base_url=self.api_base or None,
-            timeout=60.0,
         )
         logger.debug(f"LLM 客户端初始化成功: model={self.model_name}")
 
@@ -74,6 +72,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, Any]],
         tool_choice: str = "auto",
+        max_tokens: Optional[int] = None,
     ) -> LLMResponse:
         """
         发送聊天请求到 LLM
@@ -81,6 +80,7 @@ class LLMClient:
         Args:
             messages: 消息列表
             tool_choice: 工具选择策略
+            max_tokens: 最大输出 token 数，None 表示不限制
 
         Returns:
             LLMResponse 封装的响应
@@ -88,51 +88,29 @@ class LLMClient:
         if not self._client:
             raise RuntimeError("LLM 客户端未初始化，请先调用 initialize()")
 
-        # 1. 构建请求参数字典
+        # 直接构建请求参数，跳过 Pydantic 验证开销
         request_dict: Dict[str, Any] = {
             "model": self.model_name,
             "messages": messages,
             "temperature": self.temperature,
         }
-
         if self.tools:
             request_dict["tools"] = self.tools
             request_dict["tool_choice"] = tool_choice
+        if max_tokens:
+            request_dict["max_tokens"] = max_tokens
 
-        # 2. 使用 Pydantic 模型验证请求参数
-        try:
-            validated_request = ChatCompletionsRequest(**request_dict)
-            logger.debug("请求参数验证通过")
-        except Exception as e:
-            logger.error(f"请求参数验证失败: {e}")
-            raise
-
-        # 3. 调试日志：输出发送给 LLM 的消息（限制内容长度，避免泄露敏感信息）
-        logger.debug(f"发送给 LLM 的消息数: {len(messages)}")
+        # 调试日志
         for i, msg in enumerate(messages):
-            role = msg.get("role", "unknown")
-            # 只记录消息角色和长度，不记录内容（避免泄露用户隐私）
-            content = str(msg.get("content", ""))
-            logger.debug(f"消息 {i} [{role}]: 长度={len(content)}")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                logger.info(f"消息 {i} [{msg.get('role')}]: 多模态格式, types={[c.get('type') for c in content]}")
 
-        # 4. 调用 API
-        response = await self._client.chat.completions.create(
-            **validated_request.model_dump(exclude_none=True)
-        )
+        response = await self._client.chat.completions.create(**request_dict)
         message = response.choices[0].message
 
-        # 5. 记录 token 使用情况
-        if response.usage:
-            logger.debug(f"使用了 {response.usage.total_tokens} tokens "
-                        f"(prompt: {response.usage.prompt_tokens}, "
-                        f"completion: {response.usage.completion_tokens})")
-
-        # 6. 调试日志：输出 LLM 的响应
         if message.tool_calls:
-            tool_names = [tc.function.name for tc in message.tool_calls]
-            logger.info(f"LLM 决定调用工具: {tool_names}")
-        else:
-            logger.debug(f"LLM 直接回复: {str(message.content)[:200]}...")
+            logger.info(f"LLM 决定调用工具: {[tc.function.name for tc in message.tool_calls]}")
 
         return LLMResponse(
             content=message.content,

@@ -95,9 +95,7 @@ class MessagePreprocessor:
         """统一的消息预处理"""
         try:
             # 根据消息类型进行特定处理
-            if msg_type == ContextType.IMAGE:
-                return "[图片消息]"
-            elif msg_type == ContextType.VIDEO:
+            if msg_type == ContextType.VIDEO:
                 return "[视频消息]"
 
             # 1. 尝试解析为JSON

@@ -3,7 +3,7 @@
 """
 from typing import Dict, Any
 from bridge.context import Context, ContextType
-from .base import BaseHandler
+from .base import BaseHandler, send_to_user
 from database.db_manager import db_manager
 from utils.logger_loguru import get_logger
 from Channel.pinduoduo.utils.API.send_message import SendMessage
@@ -96,7 +96,7 @@ class KeywordDetectionHandler(BaseHandler):
                         self.logger.error("会话转接失败")
                 else:
                     self.logger.warning("没有其他可用的客服进行转接")
-                    sender.send_text(from_uid, "抱歉，当前没有其他客服在线，请您稍后再试。")
+                    await send_to_user(shop_id, user_id, from_uid, "抱歉，当前没有其他客服在线，请您稍后再试。")
             
             return False
             
