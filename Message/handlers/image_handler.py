@@ -96,6 +96,7 @@ class ImageHandler(BaseHandler):
             self.logger.info(f"[图片] 用户 {from_uid} 已核销，内容交给 AI 处理")
             asyncio.create_task(self._ai_handler.handle(fake_context, metadata))
         else:
+<<<<<<< HEAD
             # 未核销：用专用 prompt 二次提取核销信息，避免 OCR 原文误匹配
             voucher_text = await self._voucher_handler._ocr_image(image_url)
             if voucher_text:
@@ -109,6 +110,9 @@ class ImageHandler(BaseHandler):
                 # 无核销信息，原始 OCR 文字交给 AI
                 self.logger.info(f"[图片] 未提取到核销信息，内容交给 AI 处理")
                 asyncio.create_task(self._ai_handler.handle(fake_context, metadata))
+=======
+            asyncio.create_task(self._voucher_handler.handle(fake_context, metadata))
+>>>>>>> 15334c8044a085aca4996a48865d7fe1271e0767
         return True
 
     async def _recognize_image(self, image_url: str, retry: bool = False) -> Optional[str]:
@@ -120,6 +124,10 @@ class ImageHandler(BaseHandler):
                 return None
 
             prompt = "OCR模式：原样输出图中所有文字，禁止分析、禁止加工、禁止总结。如果是实物外观照片则简述外观状况。" if not retry else "输出图中所有可见内容。"
+<<<<<<< HEAD
+=======
+
+>>>>>>> 15334c8044a085aca4996a48865d7fe1271e0767
             response = await client.chat(
                 messages=[{
                     "role": "user",

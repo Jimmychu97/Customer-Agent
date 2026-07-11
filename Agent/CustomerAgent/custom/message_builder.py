@@ -210,12 +210,16 @@ class MessageBuilder:
             logger.info(f"[图片消息] 构建多模态消息, URL={query}")
             messages.append({"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": query}},
+<<<<<<< HEAD
                 {"type": "text", "text": (
                     "请查看这张图片，结合我们之前的对话记录（如验机报告、设备信息等），"
                     "给出专业、亲切的分析或回复。"
                     "如果图片是手机外观、配置截图、验机报告等，请结合已有报告数据综合分析。"
                     "如果图片与对话无关，请正常回复。"
                 )},
+=======
+                {"type": "text", "text": "请识别图片中的序列号、IMEI码或卡券详情的卡券码，提取后按客服流程处理。"},
+>>>>>>> 15334c8044a085aca4996a48865d7fe1271e0767
             ]})
         else:
             messages.append({"role": "user", "content": query})

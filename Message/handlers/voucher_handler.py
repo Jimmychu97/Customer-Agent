@@ -14,6 +14,7 @@ import asyncio
 from typing import Optional, Dict, Any, Tuple
 from bridge.context import Context, ContextType
 from .base import BaseHandler, send_to_user
+<<<<<<< HEAD
 
 
 # 触发 SN/IMEI 提取的关键词（关键词出现在数字前后 50 字符内）
@@ -26,6 +27,8 @@ def _near_keyword(text: str, start: int, end: int, pattern: re.Pattern, window: 
     """检查数字前后 window 字符内是否有指定关键词"""
     region = text[max(0, start - window): end + window]
     return bool(pattern.search(region))
+=======
+>>>>>>> 15334c8044a085aca4996a48865d7fe1271e0767
 
 
 def _extract_imei(text: str) -> Optional[str]:
@@ -52,11 +55,19 @@ def _extract_serial(text: str) -> Optional[str]:
 
 
 def _extract_coupon(text: str) -> Optional[str]:
+<<<<<<< HEAD
     """提取拼多多卡券号（10-14位纯数字），要求附近有卡券相关关键词"""
     # 先尝试匹配带空格的分组数字（如 3560 7227 2865）
     for m in re.finditer(r'(?<![\d])((\d{3,5}[\s]+){1,4}\d{3,5})(?![\d])', text):
         candidate = re.sub(r'\s+', '', m.group(1))
         if 10 <= len(candidate) <= 14 and _near_keyword(text, m.start(1), m.end(1), _COUPON_KEYWORDS):
+=======
+    """提取拼多多卡券号（10-14位纯数字，支持带空格格式如 '3560 7227 2865'，排除IMEI和手机号）"""
+    # 先尝试匹配带空格的分组数字（如 3560 7227 2865）
+    for m in re.finditer(r'(?<![\d])((\d{3,5}[\s]+){1,4}\d{3,5})(?![\d])', text):
+        candidate = re.sub(r'\s+', '', m.group(1))
+        if 10 <= len(candidate) <= 14:
+>>>>>>> 15334c8044a085aca4996a48865d7fe1271e0767
             return candidate
     # 再匹配连续数字
     for m in re.finditer(r'(?<!\d)(\d{10,14})(?!\d)', text):
@@ -66,10 +77,17 @@ def _extract_coupon(text: str) -> Optional[str]:
         after = text[end] if end < len(text) else ""
         if before.isdigit() or after.isdigit():
             continue
+<<<<<<< HEAD
         if len(candidate) == 11 and candidate.startswith('1'):
             continue
         if _near_keyword(text, start, end, _COUPON_KEYWORDS):
             return candidate
+=======
+        # 排除手机号（11位且以1开头）
+        if len(candidate) == 11 and candidate.startswith('1'):
+            continue
+        return candidate
+>>>>>>> 15334c8044a085aca4996a48865d7fe1271e0767
     return None
 
 
@@ -721,6 +739,7 @@ class VoucherDetectionHandler(BaseHandler):
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] 更新 Order 状态失败 order_id={order_id}: {e}")
 
+<<<<<<< HEAD
     async def _ocr_image(self, image_url: str) -> str:
         """调用 VL 模型提取图片中的卡券码或序列号/IMEI
 
@@ -786,6 +805,10 @@ class VoucherDetectionHandler(BaseHandler):
 
     async def _send(self, shop_id: str, user_id: str, from_uid: str, text: str, delay: float = 0) -> bool:
         try:
+=======
+    async def _send(self, shop_id: str, user_id: str, from_uid: str, text: str, delay: float = 0) -> bool:
+        try:
+>>>>>>> 15334c8044a085aca4996a48865d7fe1271e0767
             await send_to_user(shop_id, user_id, from_uid, text, delay)
             return True
         except Exception as e:
