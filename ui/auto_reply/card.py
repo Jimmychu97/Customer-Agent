@@ -1,7 +1,7 @@
 # 账号卡片组件模块
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QLabel, QWidget, QHBoxLayout, QVBoxLayout
-from PyQt6.QtGui import QFont, QPixmap
+from PyQt6.QtGui import QFont, QPixmap, QPainter, QPainterPath
 from qfluentwidgets import CardWidget, StrongBodyLabel, CaptionLabel, BodyLabel, PushButton, PrimaryPushButton, InfoBadge, FluentIcon as FIF
 from .threads import LogoLoaderThread
 
@@ -235,12 +235,28 @@ class AutoReplyCard(CardWidget):
         else:
             self.logo_label.setText("无Logo")
 
-    def setLogo(self, pixmap: QPixmap):
-        """设置Logo"""
-        if not pixmap.isNull():
-            self.logo_label.setPixmap(pixmap)
-        else:
+    def setLogo(self, data: bytes):
+        """在主线程中处理图片数据并设置Logo"""
+        if not data:
             self.logo_label.setText("加载失败")
+            return
+        pixmap = QPixmap()
+        pixmap.loadFromData(data)
+        if pixmap.isNull():
+            self.logo_label.setText("加载失败")
+            return
+        size = 60
+        circular_pixmap = QPixmap(size, size)
+        circular_pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(circular_pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addEllipse(0, 0, size, size)
+        painter.setClipPath(path)
+        scaled = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+        painter.drawPixmap(0, 0, scaled)
+        painter.end()
+        self.logo_label.setPixmap(circular_pixmap)
 
 
 __all__ = ['AutoReplyCard']

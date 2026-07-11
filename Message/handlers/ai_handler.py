@@ -58,6 +58,11 @@ class AIReplyHandler(BaseHandler):
                 await send_to_user(shop_id, user_id, from_uid, "亲，收到视频啦！😊 不过我无法识别视频内容哦～有什么问题直接文字告诉我吧！")
                 return True
 
+            # 图片消息不应到这里（应由 ImageHandler 处理）
+            if context.type == ContextType.IMAGE:
+                self.logger.warning("[AI] 收到图片消息，应由 ImageHandler 处理，跳过")
+                return False
+
             processed_content = self.preprocessor.process(context.content, context.type)
             reply = await self._get_ai_reply(processed_content, context)
 

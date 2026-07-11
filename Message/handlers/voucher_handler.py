@@ -16,30 +16,34 @@ from bridge.context import Context, ContextType
 from .base import BaseHandler, send_to_user
 
 
+# 触发 SN/IMEI 提取的关键词（关键词出现在数字前后 50 字符内）
+_SN_KEYWORDS = re.compile(r'(SN|IMEI|序列号|imei|sn)', re.IGNORECASE)
+# 触发卡券提取的关键词
+_COUPON_KEYWORDS = re.compile(r'(电子券码|卡券码|卡券详情|券码|卡券号)')
+
+
+def _near_keyword(text: str, start: int, end: int, pattern: re.Pattern, window: int = 50) -> bool:
+    """检查数字前后 window 字符内是否有指定关键词"""
+    region = text[max(0, start - window): end + window]
+    return bool(pattern.search(region))
+
+
 def _extract_imei(text: str) -> Optional[str]:
-    """提取IMEI（15位纯数字，支持带空格格式 35 227917 289634 6）"""
+    """提取IMEI（15位纯数字），要求附近有 SN/IMEI/序列号 关键词"""
     m = re.search(r'(?<!\d)(\d{15})(?!\d)', text)
-    if m:
+    if m and _near_keyword(text, m.start(1), m.end(1), _SN_KEYWORDS):
         return m.group(1)
     for m in re.finditer(r'(\d[\d ]{13,20}\d)', text):
         candidate = re.sub(r'\s+', '', m.group(1))
-        if len(candidate) == 15:
+        if len(candidate) == 15 and _near_keyword(text, m.start(1), m.end(1), _SN_KEYWORDS):
             return candidate
     return None
 
 
 def _extract_serial(text: str) -> Optional[str]:
-    """提取苹果序列号
-    苹果序列号规则：
-    - 8-12位字母数字混合
-    - 只含大写字母 A-Z 和数字 0-9 
-    - 必须含有字母（排除纯数字）
-    - 用户输入的 o/O 自动替换为 0
-    """
-    # 将大小写 o/O 替换为 0，再转大写
-    APPLE_CHARS = r'[A-HJ-NP-RT-Z0-9]'
-    normalized = text.replace('o', '0').replace('O', '0').upper()
-    for m in re.finditer(rf'(?<![A-Z0-9])({APPLE_CHARS}{{8,12}})(?![A-Z0-9])', normalized):
+    """提取序列号（8-12位字母数字混合，至少2个字母）"""
+    normalized = text.upper()
+    for m in re.finditer(r'(?<![A-Z0-9])([A-Z0-9]{8,12})(?![A-Z0-9])', normalized):
         val = m.group(1)
         letters = len(re.findall(r'[A-Z]', val))
         if letters >= 2:
@@ -48,11 +52,11 @@ def _extract_serial(text: str) -> Optional[str]:
 
 
 def _extract_coupon(text: str) -> Optional[str]:
-    """提取拼多多卡券号（10-14位纯数字，支持带空格格式如 '3560 7227 2865'，排除IMEI和手机号）"""
+    """提取拼多多卡券号（10-14位纯数字），要求附近有卡券相关关键词"""
     # 先尝试匹配带空格的分组数字（如 3560 7227 2865）
     for m in re.finditer(r'(?<![\d])((\d{3,5}[\s]+){1,4}\d{3,5})(?![\d])', text):
         candidate = re.sub(r'\s+', '', m.group(1))
-        if 10 <= len(candidate) <= 14:
+        if 10 <= len(candidate) <= 14 and _near_keyword(text, m.start(1), m.end(1), _COUPON_KEYWORDS):
             return candidate
     # 再匹配连续数字
     for m in re.finditer(r'(?<!\d)(\d{10,14})(?!\d)', text):
@@ -62,10 +66,10 @@ def _extract_coupon(text: str) -> Optional[str]:
         after = text[end] if end < len(text) else ""
         if before.isdigit() or after.isdigit():
             continue
-        # 排除手机号（11位且以1开头）
         if len(candidate) == 11 and candidate.startswith('1'):
             continue
-        return candidate
+        if _near_keyword(text, start, end, _COUPON_KEYWORDS):
+            return candidate
     return None
 
 
@@ -716,6 +720,69 @@ class VoucherDetectionHandler(BaseHandler):
                     order.status = status
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] 更新 Order 状态失败 order_id={order_id}: {e}")
+
+    async def _ocr_image(self, image_url: str) -> str:
+        """调用 VL 模型提取图片中的卡券码或序列号/IMEI
+
+        Returns:
+            结构化结果如 '电子券码：xxx' 或 'SN：xxx'，无则返回空字符串
+        """
+        if not image_url:
+            return ""
+        try:
+            from Message.handlers.image_handler import _get_vl_client
+            client = await _get_vl_client()
+            if not client:
+                self.logger.warning("[核销] VL 模型未配置，跳过图片OCR")
+                return ""
+
+            prompt = (
+                "你是一个信息提取助手，专门从拼多多卡券截图或苹果设备信息截图中提取关键编号。\n"
+                "\n"
+                "## 任务规则\n"
+                "\n"
+                "### 情况一：卡券截图\n"
+                "判断依据：页面顶部标题含有【电子券码待使用】或【卡券详情】\n"
+                "提取目标：条形码正下方显示的数字（通常为12位，可能带空格如 2278 4346 5267）\n"
+                "输出格式：电子券码：<去掉空格后的纯数字>\n"
+                "排除项：订单号（含连字符，如 260710-049681569390051）不是券码\n"
+                "\n"
+                "### 情况二：设备信息截图\n"
+                "判断依据：页面含有【关于本机】或设备参数列表\n"
+                "提取目标（优先级从高到低，只取第一个找到的）：\n"
+                "  - 序列号字段对应的值（字母数字混合，8-12位，如 H9GFDE9GQ1KV）\n"
+                "  - IMEI字段对应的值（15位纯数字，去掉空格，如 356748110304999）\n"
+                "输出格式：SN：<值>\n"
+                "排除项：ICCID（19-20位长数字）、型号（含斜杠如 MYLD2CH/A）、"
+                "无线局域网/蓝牙地址（含冒号如 78:E3:DE）、手机号、订单号\n"
+                "\n"
+                "## 输出要求\n"
+                "- 只输出一行结果，不要解释\n"
+                "- 两种情况都没有时，输出：无\n"
+                "- 不要同时输出卡券码和SN，每张图只有一种\n"
+                "\n"
+                "## 示例\n"
+                "卡券图 → 电子券码：227843465267\n"
+                "设备序列号图 → SN：H9GFDE9GQ1KV\n"
+                "设备IMEI图 → SN：356748110304999\n"
+                "无关图片 → 无"
+            )
+            response = await client.chat(
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ]
+                }],
+                tool_choice="none",
+            )
+            result = (response.content or "").strip()
+            self.logger.info(f"[核销] 图片OCR结果: {result!r}")
+            return "" if result == "无" else result
+        except Exception as e:
+            self.logger.warning(f"[核销] 图片OCR失败: {e}")
+            return ""
 
     async def _send(self, shop_id: str, user_id: str, from_uid: str, text: str, delay: float = 0) -> bool:
         try:

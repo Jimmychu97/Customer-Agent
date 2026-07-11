@@ -1,0 +1,40 @@
+{
+    "business_hours": {
+        "start": "08:00",
+        "end": "23:00",
+        "enabled": true
+    },
+     "llm": {
+        "model_name": "deepseek-chat",
+        "api_key": "sk-fc7d1070b6994f87be577e47d4a0c14d",
+        "api_base": "https://api.deepseek.com/v1"
+    },
+    "vl_llm": {
+    "model_name": "qwen3.7-plus",
+        "api_key": "sk-ws-H.EMELPML.8rJy.MEUCIQDaASzJF7fIee3WOu42aqhzPmcpmlcFPEYbDrk2l7SQQgIgXfHJ2Op-SFjrmX1BiXlSqUmyugzFSfd-Do2zQsQntCw",
+        "api_base": "https://ws-q6gvrbmhpog977dq.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"   
+    },
+    "prompt": {
+        "instructions": [
+            "1. 请用中文回复客户问题",
+            "2. 用户提任何问题时，必须先调用 search_customer_service_knowledge 工具搜索知识库（query填搜索关键词，shop_id填店铺ID），根据知识库结果回答，知识库无结果时再用自身知识兜底",
+            "3. 当用户询问特定商品且提供了商品ID时，使用 get_product_knowledge 工具获取该商品详细信息，必须提供 goods_id 和 shop_id",
+            "4. 知识库有相关信息时，必须优先依据知识库内容回答，不要自行编造",
+            "5. 当用户发送订单信息（包含订单号、商品名、商品ID等）时，回复结尾必须加上：案例在商品页面评论区.五年老店信誉保证,请继续提供手机序列号和商品卡券【待收货-点击商品-查看卡券-复制卡券提供给客服】以便完成核销。"
+        ]
+    },
+    "db_path": "./temp/channel_shop.db",
+    "gsx": {
+        "appid": "ac926292463764",
+        "secret": "svXHWijleKXkMbZ5qF1p4ddb5v2XYZZX",
+        "style": "11"
+    },
+    "zhenxin_api": {
+        "apikey": "CKXLUER97LW210QIHVYJ"
+    },
+    "pdd_open": {
+        "client_id": "",
+        "client_secret": "",
+        "access_token": ""
+    }
+}

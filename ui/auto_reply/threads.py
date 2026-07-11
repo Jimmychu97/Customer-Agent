@@ -1,15 +1,14 @@
 # 后台线程模块
 import asyncio
 from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QPixmap, QPainter, QPainterPath
-from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap
 import requests
 from utils.logger_loguru import get_logger
 
 
 class LogoLoaderThread(QThread):
     """异步加载Logo的线程"""
-    logo_loaded = pyqtSignal(QPixmap)
+    logo_loaded = pyqtSignal(bytes)  # 传回原始字节，QPixmap 操作在主线程完成
 
     def __init__(self, url):
         super().__init__()
@@ -19,35 +18,11 @@ class LogoLoaderThread(QThread):
         try:
             response = requests.get(self.url, timeout=10)
             response.raise_for_status()
-
-            pixmap = QPixmap()
-            pixmap.loadFromData(response.content)
-
-            if pixmap.isNull():
-                raise ValueError("Loaded data is not a valid image.")
-
-            # 创建圆形pixmap
-            size = 60
-            circular_pixmap = QPixmap(size, size)
-            circular_pixmap.fill(Qt.GlobalColor.transparent)
-
-            painter = QPainter(circular_pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-            path = QPainterPath()
-            path.addEllipse(0, 0, size, size)
-
-            painter.setClipPath(path)
-
-            # 缩放并绘制原始图片
-            scaled_pixmap = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-            painter.drawPixmap(0, 0, scaled_pixmap)
-            painter.end()
-
-            self.logo_loaded.emit(circular_pixmap)
+            # 只在子线程做网络请求，将原始字节数据传回主线程处理
+            self.logo_loaded.emit(response.content)
         except Exception as e:
             get_logger().error(f"Failed to load logo from {self.url}: {e}")
-            self.logo_loaded.emit(QPixmap())
+            self.logo_loaded.emit(b"")
 
 
 class AutoReplyThread(QThread):

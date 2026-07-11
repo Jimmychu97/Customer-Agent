@@ -289,7 +289,7 @@ class ProductSyncService:
                         progress_callback(progress)
 
         # 并发处理，控制并发数量避免限流
-        max_concurrent = 3  # 最多3个并发
+        max_concurrent = 10
         semaphore = asyncio.Semaphore(max_concurrent)
 
         async def process_with_semaphore(product: Dict[str, Any]):

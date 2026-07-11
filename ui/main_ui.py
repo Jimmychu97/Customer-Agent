@@ -1,5 +1,5 @@
 import sys
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QSettings
 from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel
 from PyQt6.QtGui import QFont, QIcon, QPixmap
 from qfluentwidgets import FluentWindow,qrouter, NavigationItemPosition
@@ -142,15 +142,13 @@ class MainWindow(FluentWindow):
 
     # 初始化窗口
     def initWindow(self):
-        # 先设置最小尺寸
         self.setMinimumWidth(1280)
         self.setMinimumHeight(720)
-        
-        # 设置默认尺寸（避免几何冲突）
         self.resize(1400, 800)
+        # 窗口显示后再恢复上次尺寸，避免 QPainter 错误
+        QTimer.singleShot(0, self._restore_window_state)
         
-        # 最后最大化显示
-        self.showMaximized()
+
 
 
     def showQRCode(self):
@@ -174,14 +172,31 @@ class MainWindow(FluentWindow):
         except Exception as e:
             self.logger.error(f"显示二维码失败: {e}")
 
+    def _restore_window_state(self):
+        """窗口显示后恢复上次的尺寸和位置（不恢复最大化状态）"""
+        settings = QSettings("AgentCustomer", "MainWindow")
+        w = settings.value("width", type=int)
+        h = settings.value("height", type=int)
+        x = settings.value("x", type=int)
+        y = settings.value("y", type=int)
+        if w and h:
+            self.resize(w, h)
+        if x is not None and y is not None:
+            self.move(x, y)
+
     def closeEvent(self, a0):
         """ 重写窗口关闭事件，确保后台线程安全退出 """
-
-        # 停止所有自动回复线程
         try:
             from ui.auto_reply_ui import auto_reply_manager
             auto_reply_manager.stop_all()
         except Exception:
             pass
 
-        super().closeEvent(a0) 
+        # 只在非最大化时保存尺寸，避免下次以最大化尺寸打开
+        if not self.isMaximized():
+            settings = QSettings("AgentCustomer", "MainWindow")
+            settings.setValue("width", self.width())
+            settings.setValue("height", self.height())
+            settings.setValue("x", self.x())
+            settings.setValue("y", self.y())
+        super().closeEvent(a0)

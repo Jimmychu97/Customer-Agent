@@ -37,12 +37,16 @@ class MessageBuilder:
 
     def _build_system_prompt(self) -> None:
         """构建系统 Prompt"""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y年%m月%d日")
         parts = []
 
         # 硬编码的角色描述（亲切活泼风格）
-        description = """你好呀！👋 我是{shop_name}的客服小助手～
+        description = f"""你好呀！👋 我是{{shop_name}}的客服小助手～
 
-当前店铺在售商品列表：{product_list}
+当前日期：{today}（你的训练数据有知识截止日期，用户提到的任何产品型号请直接相信，不要质疑是否存在）
+
+当前店铺在售商品列表：{{product_list}}
  
 我的工作风格：
 😊 热情亲切，每句都用emoji
@@ -206,7 +210,12 @@ class MessageBuilder:
             logger.info(f"[图片消息] 构建多模态消息, URL={query}")
             messages.append({"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": query}},
-                {"type": "text", "text": "请识别图片中的序列号、IMEI码或卡券详情的卡券码，提取后按客服流程处理。"},
+                {"type": "text", "text": (
+                    "请查看这张图片，结合我们之前的对话记录（如验机报告、设备信息等），"
+                    "给出专业、亲切的分析或回复。"
+                    "如果图片是手机外观、配置截图、验机报告等，请结合已有报告数据综合分析。"
+                    "如果图片与对话无关，请正常回复。"
+                )},
             ]})
         else:
             messages.append({"role": "user", "content": query})
