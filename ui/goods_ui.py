@@ -55,23 +55,49 @@ class SyncAllGoodsThread(QThread):
                 skus = r.get("skus", [])
 
                 with db_manager.get_session() as session:
-                    # 删除该商品旧SKU数据
-                    session.query(GoodsCommit).filter_by(
-                        shop_id=str(self.db_shop_id), goods_id=str(goods_id)
-                    ).delete()
+                    # 按 sku_id 索引已有记录，保留用户填写的字段
+                    existing = {
+                        gc.sku_id: gc
+                        for gc in session.query(GoodsCommit).filter_by(
+                            shop_id=str(self.db_shop_id), goods_id=str(goods_id)
+                        ).all()
+                    }
 
+                    incoming_sku_ids = set()
                     for sku in skus:
                         specs = sku.get("spec", [])
                         spec = specs[0] if specs else {}
-                        session.add(GoodsCommit(
-                            shop_id=str(self.db_shop_id),
-                            goods_id=str(goods_id),
-                            sku_id=str(sku.get("sku_id", "")),
-                            parent_id=spec.get("parent_id"),
-                            parent_name=spec.get("parent_name", ""),
-                            spec_id=str(spec.get("spec_id", "")) if spec.get("spec_id") else None,
-                            spec_name=spec.get("spec_name", ""),
-                        ))
+                        sku_id = str(sku.get("sku_id", ""))
+                        incoming_sku_ids.add(sku_id)
+                        # 多维度规格名拼接，如「黑色 128G」
+                        spec_name = " ".join(s.get("spec_name", "") for s in specs if s.get("spec_name"))
+                        parent_name = " / ".join(s.get("parent_name", "") for s in specs if s.get("parent_name"))
+
+                        if sku_id in existing:
+                            # 已存在：只更新结构字段，保留 server_id / zhenxin_server_id / device_type
+                            gc = existing[sku_id]
+                            gc.parent_id = spec.get("parent_id")
+                            gc.parent_name = parent_name
+                            gc.spec_id = str(spec.get("spec_id", "")) if spec.get("spec_id") else None
+                            gc.spec_name = spec_name
+                            session.flush()  # 强制写入变更
+                        else:
+                            # 新增 SKU
+                            session.add(GoodsCommit(
+                                shop_id=str(self.db_shop_id),
+                                goods_id=str(goods_id),
+                                sku_id=sku_id,
+                                parent_id=spec.get("parent_id"),
+                                parent_name=parent_name,
+                                spec_id=str(spec.get("spec_id", "")) if spec.get("spec_id") else None,
+                                spec_name=spec_name,
+                            ))
+
+                    # 删除拼多多已下架的 SKU（本地有但远端没有的）
+                    for sku_id, gc in existing.items():
+                        if sku_id not in incoming_sku_ids:
+                            session.delete(gc)
+
                     session.commit()
                 synced += 1
 
@@ -172,9 +198,11 @@ class GoodsManagementWidget(QWidget):
         self.sku_table.itemChanged.connect(self._on_sku_item_changed)
 
         header = self.sku_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setMinimumSectionSize(80)
         for col in [1, 2, 3, 4, 5, 6]:
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        self.sku_table.horizontalHeader().setStretchLastSection(False)
         layout.addWidget(self.sku_table)
         return container
 
@@ -299,7 +327,10 @@ class GoodsManagementWidget(QWidget):
     # ──────── SKU 展示（来自 goods_commit）────────
 
     def _on_goods_selected(self):
-        row = self.goods_table.currentRow()
+        rows = self.goods_table.selectionModel().selectedRows()
+        if not rows:
+            return
+        row = rows[0].row()
         if row < 0 or row >= len(self._goods_data):
             return
         self._selected_goods_id = self._goods_data[row]["goods_id"]
@@ -319,6 +350,7 @@ class GoodsManagementWidget(QWidget):
 
                 self.sku_table.setRowCount(len(rows))
                 self._sku_rows = []  # 存储行数据用于保存
+                self.sku_table.blockSignals(True)  # 填充时屏蔽信号，防止 itemChanged 干扰
                 for i, row in enumerate(rows):
                     values = [
                         row.spec_name or "",
@@ -337,6 +369,7 @@ class GoodsManagementWidget(QWidget):
                         if col < 4:
                             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                         self.sku_table.setItem(i, col, item)
+                self.sku_table.blockSignals(False)  # 填充完成后恢复信号
         except Exception as e:
             logger.error(f"加载SKU失败: {e}")
 

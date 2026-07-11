@@ -16,14 +16,28 @@ from bridge.context import Context, ContextType
 from .base import BaseHandler
 
 
+def _luhn_check(number: str) -> bool:
+    """Luhn 算法校验 IMEI是否合法"""
+    digits = [int(d) for d in number]
+    odd_sum = sum(digits[-1::-2])
+    even_sum = sum(sum(divmod(d * 2, 10)) for d in digits[-2::-2])
+    return (odd_sum + even_sum) % 10 == 0
+
+
 def _extract_imei(text: str) -> Optional[str]:
-    """提取IMEI（15位纯数字，支持带空格格式 35 227917 289634 6）"""
-    m = re.search(r'(?<!\d)(\d{15})(?!\d)', text)
-    if m:
-        return m.group(1)
+    """提取 IMEI
+    规则：15位纯数字 + Luhn 算法校验
+    支持带空格格式：35 227917 289634 6
+    """
+    # 先尝试连续15位
+    for m in re.finditer(r'(?<!\d)(\d{15})(?!\d)', text):
+        candidate = m.group(1)
+        if _luhn_check(candidate):
+            return candidate
+    # 再尝试带空格格式
     for m in re.finditer(r'(\d[\d ]{13,20}\d)', text):
         candidate = re.sub(r'\s+', '', m.group(1))
-        if len(candidate) == 15:
+        if len(candidate) == 15 and _luhn_check(candidate):
             return candidate
     return None
 
@@ -31,19 +45,24 @@ def _extract_imei(text: str) -> Optional[str]:
 def _extract_serial(text: str) -> Optional[str]:
     """提取苹果序列号
     苹果序列号规则：
-    - 8-12位字母数字混合
-    - 只含大写字母 A-Z 和数字 0-9 
-    - 必须含有字母（排除纯数字）
+    - 新款（2021年后随机序列号）：固定 12 位
+    - 旧款：固定 10 位
+    - 字符集：A-Z + 0-9，排除 I、O（苹果官方不使用）
+    - 必须同时含字母和数字（排除纯数字、纯字母）
     - 用户输入的 o/O 自动替换为 0
     """
-    # 将大小写 o/O 替换为 0，再转大写
-    APPLE_CHARS = r'[A-HJ-NP-RT-Z0-9]'
+    APPLE_CHARS = r'[A-HJ-NP-Z0-9]'  # 排除 I、O
     normalized = text.replace('o', '0').replace('O', '0').upper()
-    for m in re.finditer(rf'(?<![A-Z0-9])({APPLE_CHARS}{{8,12}})(?![A-Z0-9])', normalized):
-        val = m.group(1)
-        letters = len(re.findall(r'[A-Z]', val))
-        if letters >= 2:
-            return val
+    # 苹果序列号固定 10 位或 12 位
+    for length in (12, 10):
+        for m in re.finditer(
+            rf'(?<![A-Z0-9])({APPLE_CHARS}{{{length}}})(?![A-Z0-9])', normalized
+        ):
+            val = m.group(1)
+            has_letter = bool(re.search(r'[A-Z]', val))
+            has_digit = bool(re.search(r'[0-9]', val))
+            if has_letter and has_digit:
+                return val
     return None
 
 

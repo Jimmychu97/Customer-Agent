@@ -1,328 +1,229 @@
-# Development Guidelines: Agent-Customer
+# Development Guidelines
 
 ## Code Quality Standards
 
-### 模块文档字符串
+### Module Docstrings
 每个模块顶部必须有三引号文档字符串，说明模块职责：
 ```python
 """
-模块名称
+模块功能描述
 
-简要说明模块功能和职责。
-如有重要约束（如初始化顺序），在此说明。
+关键说明或注意事项
 """
 ```
 
-### 类文档字符串
-类必须有文档字符串，说明职责和核心特性：
+### `__init__.py` 模式
+- 空 `__init__.py`：纯命名空间包（如 `Agent/`, `Agent/CustomerAgent/`）
+- 导出型 `__init__.py`：显式声明 `__all__`，通过相对导入聚合子模块公共 API：
 ```python
-class Config:
-    """
-    线程安全的配置管理器
+from .base import BaseHandler
+from .ai_handler import AIReplyHandler
 
-    特性：
-    - 类型安全的配置访问
-    - 配置验证
-    - 线程安全
-    """
+__all__ = ['BaseHandler', 'AIReplyHandler']
+```
+- DI 代理型 `__init__.py`：通过 `_create_proxy` 提供向后兼容的模块级单例：
+```python
+from core.service_providers import _create_proxy
+db_manager = _create_proxy(DatabaseManager)
 ```
 
-### 方法文档字符串（Args/Returns 格式）
-公共方法使用 Google 风格文档字符串：
-```python
-def get(self, key: str, default: Any = None) -> Any:
-    """
-    获取配置项，支持点号分隔的嵌套访问
+### 类命名与结构
+- 类名使用 PascalCase，文件名使用 snake_case
+- 每个类有简短的类级文档字符串说明职责
+- 子组件使用延迟初始化（`Optional[Type] = None`），在 `initialize_async()` 中赋值
 
-    Args:
-        key: 配置键名，支持嵌套访问如 'llm.api_key'
-        default: 默认值
-
-    Returns:
-        配置值
-    """
-```
-
-### 私有方法命名
-内部辅助方法以单下划线前缀：`_generate_coupon_id`, `_calculate_discount`, `_get_user_info`
-
-### 常量命名
-模块级常量使用全大写：`DEFAULT_DB_PATH`, `DEFAULT_TOKEN_WINDOW`, `ZIP_SIGNATURE`
-
----
-
-## Structural Conventions
-
-### 返回值统一格式
-业务方法统一返回 `dict`，包含 `success` 字段：
-```python
-# 成功
-return {"success": True, "coupon_id": coupon_id, "total_quantity": total_quantity}
-
-# 失败
-return {"success": False, "error_msg": "优惠券不存在"}
-```
-
-### 异常处理模式
-所有业务方法用 `try/except Exception` 包裹，失败时记录日志并返回错误字典：
-```python
-def some_method(self) -> Dict[str, Any]:
-    try:
-        # 业务逻辑
-        return {"success": True, ...}
-    except Exception as e:
-        self.logger.error(f"操作失败: {str(e)}")
-        return {"success": False, "error_msg": str(e)}
-```
-
-### 数据类用于验证结果
-使用 `@dataclass` 封装验证结果，避免裸字典：
-```python
-@dataclass
-class ValidationResult:
-    is_valid: bool
-    error_type: Optional[str] = None
-    error_message: Optional[str] = None
-    suggestions: List[str] = None
-    file_info: Dict = None
-
-    def __post_init__(self):
-        if self.suggestions is None:
-            self.suggestions = []
-```
-
-### 继承链
-- 处理器：`MessageHandler` → `BaseHandler` → 具体处理器
-- 验证器：`FileValidator` → `ExcelValidator`（调用 `super().validate_basic()` 后扩展）
-- API 管理器：`BaseRequest` → `VoucherManager`
-- Agent：`Bot` → `CustomerAgent`
-
----
-
-## Logging Pattern
-
-统一使用 Loguru，每个类在 `__init__` 中获取 logger：
+### 日志规范
+统一使用 `utils.logger_loguru` 中的 `get_logger`，**不直接使用 `logging` 模块**：
 ```python
 from utils.logger_loguru import get_logger
-
-class MyClass:
-    def __init__(self):
-        self.logger = get_logger("MyClass")
+logger = get_logger("ModuleName")  # 模块级 logger
+# 或在类中
+self.logger = get_logger("ClassName")
 ```
-
-模块级 logger（非类方法中使用）：
+日志内容截断保护隐私（内容预览限 50 字符）：
 ```python
-logger = get_logger("CustomerAgent")
-```
-
-日志级别使用规范：
-- `logger.info(f"操作成功: {detail}")` — 正常业务流程
-- `logger.error(f"操作失败: {str(e)}")` — 异常捕获
-- `logger.warning(f"达到上限 {limit}，强制结束")` — 警告
-- `logger.debug(f"注册服务: {key}")` — 调试信息
-
----
-
-## Dependency Injection Patterns
-
-### 服务注册（在 configure_standard_services 中）
-```python
-container.register_singleton(
-    MyService,
-    factory=lambda: MyService()
-)
-```
-
-### 服务获取（通过 DI 代理）
-```python
-# database/__init__.py 中定义代理
-from core.service_providers import _create_proxy
-from database.db_manager import DatabaseManager
-db_manager = _create_proxy(DatabaseManager)
-
-# 其他模块直接导入使用
-from database import db_manager
-db_manager.get_session()
-```
-
-### 避免循环依赖
-使用延迟导入（lazy import）：
-```python
-def some_method(self):
-    from some.module import SomeClass  # 在方法内部导入
-    return SomeClass()
+content_preview = str(context.content)[:50] + "..." if context.content else ""
 ```
 
 ---
 
-## Database Patterns
+## Dependency Injection Pattern
 
-### SQLAlchemy ORM 模型规范
-- 每个模型类有中文 docstring 说明用途
-- 所有 Column 必须有 `comment` 参数
-- 时间字段统一使用 `default=datetime.now` 和 `onupdate=datetime.now`
-- 唯一约束使用 `__table_args__` 中的 `UniqueConstraint`
-- 关联关系使用 `relationship` 并指定 `back_populates` 或 `backref`
-
+### 服务注册（`core/di_container.py`）
+所有核心服务通过 DI 容器统一管理，在 `app.py` 最早期调用 `configure_standard_services()`：
 ```python
-class ProductKnowledge(Base):
-    """产品知识表，存储LLM提取的商品详细知识"""
-    __tablename__ = 'product_knowledge'
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    shop_id = Column(Integer, ForeignKey('shops.id', ondelete='CASCADE'),
-                     nullable=False, comment='店铺ID')
-    created_at = Column(DateTime, default=datetime.now, comment='创建时间')
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now,
-                        comment='更新时间')
-
-    __table_args__ = (
-        UniqueConstraint('shop_id', 'goods_id', name='uix_product_knowledge_shop_goods'),
-    )
+from core.di_container import configure_standard_services
+configure_standard_services(_app_config)
 ```
 
-### Session 使用模式
+注册方式：
 ```python
-with db_manager.get_session() as session:
-    obj = session.query(Model).filter_by(field=value).first()
-    session.add(new_obj)
-    session.commit()
+container.register_singleton(ServiceType, factory=lambda: ServiceType())
+container.register_transient(ServiceType, implementation_type=ConcreteType)
 ```
 
----
-
-## Configuration Patterns
-
-### 访问配置
+获取服务：
 ```python
-from config import config
-
-# 点号分隔嵌套访问
-api_key = config.get("llm.api_key")
-db_path = config.get("db_path", "./temp/channel_shop.db")
-
-# 获取 Pydantic 验证后的模型
-cfg = config.get_model()  # 返回 ConfigModel
+from core.di_container import container
+instance = container.get(ServiceType)
 ```
 
-### Pydantic 配置模型（v2 API）
+### 双重检查锁定（线程安全单例）
 ```python
-from pydantic import BaseModel, Field, ConfigDict
-
-class LLMConfig(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    model_name: str = Field(default="", description="模型名称")
-    api_key: str = Field(default="", description="API密钥")
+if key in self._singletons:
+    return self._singletons[key]
+with self._lock:
+    if key in self._singletons:  # 二次检查
+        return self._singletons[key]
+    instance = factory()
+    self._singletons[key] = instance
 ```
 
 ---
 
 ## Async Patterns
 
-### Agent 异步初始化（延迟初始化模式）
+### 异步初始化
+组件使用 `initialize_async()` 延迟初始化，避免构造函数中执行 IO：
 ```python
-class CustomerAgent(Bot):
-    def __init__(self):
-        self._is_initialized = False
-        self._llm_client: Optional[LLMClient] = None  # 延迟初始化
+async def initialize_async(self) -> bool:
+    if self._is_initialized:
+        return True
+    try:
+        # ... 初始化逻辑
+        self._is_initialized = True
+        return True
+    except Exception as e:
+        logger.error(f"初始化失败: {e}")
+        return False
+```
 
-    async def async_reply(self, query: str, context: Context = None) -> Reply:
-        if not self._is_initialized:
-            if not await self.initialize_async():
-                return Reply(ReplyType.TEXT, "初始化失败")
-        # 业务逻辑
+### 延迟初始化调用点
+```python
+async def async_reply(self, query: str, context: Context = None) -> Reply:
+    if not self._is_initialized:
+        if not await self.initialize_async():
+            return Reply(ReplyType.TEXT, "初始化失败，请检查配置。")
 ```
 
 ### 并行工具执行
-```python
-tool_results = await self._tool_executor.execute_parallel(
-    response.tool_calls, dependencies
-)
-```
-
-### 线程安全（RLock）
-```python
-self._lock = threading.RLock()
-
-def thread_safe_method(self):
-    with self._lock:
-        # 临界区操作
-```
+多个工具调用使用 `asyncio.gather` 并行执行（见 `ToolExecutor.execute_parallel`）。
 
 ---
 
-## Bridge / Context Patterns
+## Configuration Pattern
 
-### 创建拼多多上下文
+### 访问配置
+使用点号分隔的嵌套键访问：
 ```python
-context = Context.create_pinduoduo_context(
-    content=message_text,
-    msg_id=msg_id,
-    from_uid=from_uid,
-    shop_id=shop_id,
-    user_msg_type=ContextType.TEXT,
-    channel_type=ChannelType.PINDUODUO,
-)
+from config import config
+value = config.get('llm.api_key', default='')
+config.set('llm.api_key', 'new_value', save=True)
 ```
 
-### 从 Context 提取用户信息
-```python
-from_uid = getattr(context.kwargs, "from_uid", None)
-shop_id = getattr(context.kwargs, "shop_id", None)
-```
-
----
-
-## File & Path Patterns
-
-### 路径使用 pathlib.Path
-```python
-from pathlib import Path
-
-spec_file = Path("scripts/agent_customer.spec")
-if not spec_file.exists():
-    raise FileNotFoundError(f"找不到 spec 文件: {spec_file}")
-```
-
-### 支持 PyInstaller 打包后的路径
-```python
-def get_project_root():
-    if getattr(sys, 'frozen', False):
-        return Path(sys._MEIPASS).parent
-    return Path(__file__).resolve().parent
-```
-
-### 原子文件写入
+### 原子保存
+配置保存使用临时文件 + `Path.replace()` 原子重命名，防止写入中断导致损坏：
 ```python
 temp_path = self.config_path.with_suffix('.tmp')
 with open(temp_path, 'w', encoding='utf-8') as f:
-    json.dump(data, f, ensure_ascii=False, indent=4)
-temp_path.replace(self.config_path)  # 原子重命名
+    json.dump(self._config, f, ensure_ascii=False, indent=4)
+temp_path.replace(self.config_path)
+```
+
+### Pydantic 配置模型
+所有配置段使用 Pydantic `BaseModel` 定义，带 `Field(default=..., description=...)`：
+```python
+class LLMConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    api_key: str = Field(default="", description="API密钥")
 ```
 
 ---
 
-## Tool Registration Pattern（Agent 工具）
+## Handler Chain Pattern
 
-工具通过 `@agent_tool` 装饰器注册，在 `customer_agent.py` 中通过导入触发注册：
+### 处理器基类
+所有消息处理器继承 `BaseHandler`（继承自 `MessageHandler`）：
 ```python
-# tools/search_customer_service_knowledge.py
-from Agent.CustomerAgent.custom.tool_decorator import agent_tool
-
-@agent_tool
-def search_customer_service_knowledge(query: str, shop_id: str) -> str:
-    """搜索客服知识库"""
-    ...
-
-# customer_agent.py 中导入触发注册
-from Agent.CustomerAgent.tools import search_customer_service_knowledge  # noqa: F401
+class MyHandler(BaseHandler):
+    def __init__(self, name: Optional[str] = None):
+        super().__init__()
+        self.name = name or self.__class__.__name__
 ```
 
-获取已注册工具列表：
+### 统一日志方法
+处理器使用 `log_message()` 记录操作，不直接记录完整消息内容：
 ```python
-from Agent.CustomerAgent.custom.tool_decorator import get_tools_for_llm
-tools = get_tools_for_llm()
+await self.log_message(context, "处理完成", extra_info="附加信息")
 ```
+
+---
+
+## Import Conventions
+
+### 避免循环依赖
+业务模块间使用函数内延迟导入（lazy import）：
+```python
+def some_method(self):
+    from database.knowledge_service import KnowledgeService  # 延迟导入
+    service = KnowledgeService()
+```
+
+### 工具注册触发
+Agent 工具通过导入触发 `@agent_tool` 装饰器注册，使用 `# noqa: F401` 注释：
+```python
+from Agent.CustomerAgent.tools import (
+    send_goods_link,   # noqa: F401  — 注册 send_goods_link 工具
+    move_conversation, # noqa: F401  — 注册 transfer_conversation 工具
+)
+```
+
+### 向后兼容重导出
+废弃模块保留原有导入路径，通过重导出维持兼容性：
+```python
+# utils/logging_context.py - 向后兼容而保留
+from utils.logger_loguru import log_with_ctx, format_conn_key
+__all__ = ["log_with_ctx", "format_conn_key"]
+```
+
+---
+
+## Error Handling
+
+### 降级策略
+关键路径失败时提供降级回复，不抛出异常到上层：
+```python
+except Exception as e:
+    logger.error(f"操作失败: {e}")
+    return Reply(ReplyType.TEXT, "抱歉，我现在无法回复，请稍后再试。")
+```
+
+### 用户信息提取防御
+访问 context 属性时使用 `getattr` + `hasattr` 防御：
+```python
+def _get_user_info(self, context: Context) -> str:
+    try:
+        if hasattr(context, 'kwargs') and context.kwargs:
+            from_uid = getattr(context.kwargs, 'from_uid', None)
+        return "用户:unknown"
+    except Exception:
+        return "用户:unknown"
+```
+
+---
+
+## Agent Loop Pattern
+
+CustomerAgent 的核心循环结构（`_run_agent_loop`）：
+1. 调用 LLM（`llm_client.chat`）
+2. 无 tool_calls → 返回内容
+3. 有 tool_calls → 保存 assistant 消息
+4. 检查循环上限（`max_loops`），超限强制结束
+5. 并行执行工具（`tool_executor.execute_parallel`）
+6. 将工具结果追加到 messages
+7. 回到步骤 1
+
+Session ID 格式：`{channel_type.value}{from_uid}`，降级时使用 `fallback_{hash}`。
 
 ---
 
@@ -330,54 +231,9 @@ tools = get_tools_for_llm()
 
 | 类型 | 规范 | 示例 |
 |------|------|------|
-| 类名 | PascalCase | `CustomerAgent`, `VoucherManager` |
-| 方法/函数 | snake_case | `get_voucher_code`, `verify_voucher` |
-| 私有方法 | `_snake_case` | `_generate_coupon_id`, `_calculate_discount` |
-| 常量 | UPPER_SNAKE_CASE | `DEFAULT_MAX_LOOPS`, `ZIP_SIGNATURE` |
-| 模块文件 | snake_case | `voucher_manager.py`, `di_container.py` |
-| 数据库表名 | snake_case 复数 | `product_knowledge`, `voucher_logs` |
-| 唯一约束名 | `uix_表名_字段` | `uix_product_knowledge_shop_goods` |
-
----
-
-## Import Order Convention
-
-```python
-# 1. 标准库
-import sys
-import threading
-from pathlib import Path
-from typing import Dict, Any, Optional
-
-# 2. 第三方库
-from pydantic import BaseModel, Field
-from sqlalchemy import Column, Integer, String
-
-# 3. 本项目模块（按层级：core → database → bridge → Agent → utils）
-from config import config
-from database import db_manager
-from bridge.context import Context
-from utils.logger_loguru import get_logger
-```
-
----
-
-## Error Handling Hierarchy
-
-```
-ConfigError (基类)
-├── ConfigFileNotFoundError
-├── ConfigParseError
-└── ConfigValidationError
-```
-
-自定义异常继承自具体业务基类，不直接继承 `Exception`。
-
----
-
-## Windows-Specific Considerations
-
-- 文件编码：读写文件统一使用 `encoding='utf-8'`，Windows bat 文件使用 `encoding='gbk'`
-- 控制台编码：脚本入口设置 `kernel32.SetConsoleOutputCP(65001)`
-- 路径分隔符：统一使用 `pathlib.Path`，避免硬编码 `\\`
-- subprocess：Windows 上指定 `encoding='utf-8'` 避免 Unicode 问题
+| 类 | PascalCase | `CustomerAgent`, `DIContainer` |
+| 函数/方法 | snake_case | `async_reply`, `get_logger` |
+| 常量 | UPPER_SNAKE_CASE | `DEFAULT_MAX_LOOPS`, `DEFAULT_TOKEN_WINDOW` |
+| 私有属性 | 单下划线前缀 | `self._config`, `self._lock` |
+| 模块文件 | snake_case | `customer_agent.py`, `di_container.py` |
+| 中文注释 | 优先使用中文 | 所有注释和文档字符串使用中文 |

@@ -28,15 +28,7 @@ class KeywordDetectionHandler(BaseHandler):
             return keywords
         except Exception as e:
             self.logger.error(f"加载关键词失败: {e}")
-            # 如果加载失败，使用默认关键词
-            default_keywords = {
-                "转人工", "人工客服", "真人", "客服", "人工", "工单", "好评",
-                "取消订单", "改地址", "转售后客服", "转售后", "返现", "过敏",
-                "退款", "没有效果", "骗人", "投诉", "纠纷", "开发票", "开票",
-                "烂", "取消", "备注"
-            }
-            self.logger.warning(f"使用默认关键词: {default_keywords}")
-            return default_keywords
+            return set()
 
     def can_handle(self, context: Context) -> bool:
         """检查消息是否包含关键词"""
@@ -54,7 +46,7 @@ class KeywordDetectionHandler(BaseHandler):
         # 检查是否包含任何关键词
         for keyword in self.keywords:
             if keyword in content_lower:
-                self.logger.debug(f"检测到关键词: '{keyword}' 在消息: '{context.content}'")
+                self.logger.info(f"[关键词] 触发转人工: '{keyword}' 匹配消息: '{context.content[:50]}'")
                 return True
 
         return False
