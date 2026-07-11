@@ -55,8 +55,8 @@ class LogoLoaderThread(QThread):
 
             self.logo_loaded.emit(circular_pixmap)
         except Exception as e:
-            logger.error(f"Failed to load logo from {self.url}: {e}")
-            self.logo_loaded.emit(QPixmap()) # 失败时发射空pixmap
+            logger.warning(f"Logo 加载失败 ({self.url}): {e}")
+            self.logo_loaded.emit(QPixmap())
 
 class LoginThread(QThread):
     """登录验证线程"""
@@ -528,6 +528,20 @@ class UserManagerWidget(QFrame):
         count = len(self.accounts_data)
         self.stats_label.setText(f"共 {count} 个账号")
 
+    def _init_default_keywords(self):
+        """首次创建账号时插入默认关键词（仅当关键词表为空时）"""
+        if db_manager.get_all_keywords():
+            return
+        default_keywords = [
+            "转人工", "人工客服", "真人", "客服", "人工", "工单", "好评",
+            "取消订单", "改地址", "转售后客服", "转售后", "返现", "过敏",
+            "退款", "没有效果", "骗人", "投诉", "纠纷", "开发票", "开票",
+            "烂", "取消", "备注"
+        ]
+        for kw in default_keywords:
+            db_manager.add_keyword(kw)
+        logger.info(f"已插入 {len(default_keywords)} 个默认关键词")
+
     def reloadAccounts(self):
         """重新加载账号"""
         self.loadAccountsFromDB()
@@ -651,6 +665,8 @@ class UserManagerWidget(QFrame):
                     description=f"由登录自动添加"
                 )
                 logger.info(f"新店铺 '{shop_name}' 已自动添加。")
+                # 首次创建店铺时插入默认关键词
+                self._init_default_keywords()
 
             # 3. 添加新账号
             # 注意：这里的add_account可能需要更多参数，我们传递所有已知信息

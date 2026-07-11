@@ -142,15 +142,19 @@ class MainWindow(FluentWindow):
 
     # 初始化窗口
     def initWindow(self):
-        # 先设置最小尺寸
         self.setMinimumWidth(1280)
         self.setMinimumHeight(720)
-        
-        # 设置默认尺寸（避免几何冲突）
-        self.resize(1400, 800)
-        
-        # 最后最大化显示
-        self.showMaximized()
+
+        from config import config
+        w = config.get('window.width', 1400)
+        h = config.get('window.height', 800)
+        maximized = config.get('window.maximized', False)
+
+        self.resize(w, h)
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.move((screen.width() - w) // 2, (screen.height() - h) // 2)
+        if maximized:
+            self.showMaximized()
 
 
     def showQRCode(self):
@@ -176,12 +180,18 @@ class MainWindow(FluentWindow):
 
     def closeEvent(self, a0):
         """ 重写窗口关闭事件，确保后台线程安全退出 """
+        from config import config
+        is_maximized = self.isMaximized()
+        config.set('window.maximized', is_maximized, save=False)
+        if not is_maximized:
+            config.set('window.width', self.width(), save=False)
+            config.set('window.height', self.height(), save=False)
+        config.save()
 
-        # 停止所有自动回复线程
         try:
             from ui.auto_reply_ui import auto_reply_manager
             auto_reply_manager.stop_all()
         except Exception:
             pass
 
-        super().closeEvent(a0) 
+        super().closeEvent(a0)

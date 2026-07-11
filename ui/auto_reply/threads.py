@@ -46,7 +46,7 @@ class LogoLoaderThread(QThread):
 
             self.logo_loaded.emit(circular_pixmap)
         except Exception as e:
-            get_logger().error(f"Failed to load logo from {self.url}: {e}")
+            get_logger().warning(f"Logo 加载失败 ({self.url}): {e}")
             self.logo_loaded.emit(QPixmap())
 
 

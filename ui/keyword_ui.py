@@ -168,22 +168,18 @@ class KeywordManagerWidget(QFrame):
     
 
     
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.loadKeywordsFromDB()
+
     def loadKeywordsFromDB(self):
         """从数据库加载关键词数据"""
         try:
-            # 从数据库获取所有关键词
             keywords = db_manager.get_all_keywords()
             self.keywords_data = [{"keyword": kw["keyword"]} for kw in keywords]
-            
-            # 如果数据库为空，初始化示例关键词
-            if not self.keywords_data:
-                self.initializeSampleKeywords()
-            
             self.refreshKeywordList()
         except Exception as e:
             print(f"加载关键词失败: {e}")
-            # 如果数据库加载失败，使用示例数据
-            self.initializeSampleKeywords()
     
     def initializeSampleKeywords(self):
         """初始化示例关键词到数据库"""
