@@ -59,9 +59,7 @@ def _extract_serial(text: str) -> Optional[str]:
             rf'(?<![A-Z0-9])({APPLE_CHARS}{{{length}}})(?![A-Z0-9])', normalized
         ):
             val = m.group(1)
-            has_letter = bool(re.search(r'[A-Z]', val))
-            has_digit = bool(re.search(r'[0-9]', val))
-            if has_letter and has_digit:
+            if re.search(r'[A-Z]', val):
                 return val
     return None
 
