@@ -62,7 +62,14 @@ class AIReplyHandler(BaseHandler):
                 self.logger.warning("AI回复生成失败，使用备用回复")
                 return await self._handle_fallback(context, metadata)
 
-            # 3. 发送回复
+            # 3. 检查是否有未完成的核销订单，追加引导提示
+            pending_hint = self._get_pending_voucher_hint(
+                metadata.get("shop_id"), metadata.get("from_uid")
+            )
+            if pending_hint:
+                reply = reply + "\n\n" + pending_hint
+
+            # 4. 发送回复
             success = await self._send_reply(context, reply, metadata)
             if success:
                 await self.log_message(context, "AI回复发送成功", f"回复: {reply}...")
@@ -120,6 +127,41 @@ class AIReplyHandler(BaseHandler):
         except Exception as e:
             self.logger.error(f"发送回复失败: {e}")
             return False
+
+    def _get_pending_voucher_hint(self, shop_id: Optional[str], from_uid: Optional[str]) -> str:
+        """查询该用户是否有未完成的核销订单，返回引导缺少项的提示语"""
+        if not shop_id or not from_uid:
+            return ""
+        try:
+            from database import db_manager
+            from database.models import Order
+            from datetime import datetime as dt, timedelta
+            ten_min_ago = dt.now() - timedelta(minutes=10)
+            with db_manager.session_scope() as session:
+                order = session.query(Order).filter(
+                    Order.shop_id == shop_id,
+                    Order.session_id == from_uid,
+                    Order.status == 0,
+                    Order.created_at >= ten_min_ago,
+                ).order_by(Order.id.desc()).first()
+                if not order:
+                    return ""
+                has_sn = bool(order.sn_imei)
+                has_coupon = bool(order.coupons)
+                if has_sn and not has_coupon:
+                    return (
+                        "🔔 核销进行中，还缺卡券号！\n"
+                        "待收货 → 点击商品 → 查看卡券 → 复制卡券号发给我即可完成核销。"
+                    )
+                if has_coupon and not has_sn:
+                    return (
+                        "🔔 核销进行中，还缺序列号/IMEI！\n"
+                        "拨号输入 *#06# 可查 IMEI，或设置 → 通用 → 关于本机 → 序列号，发给我即可完成核销。"
+                    )
+                return ""
+        except Exception as e:
+            self.logger.warning(f"[核销提示] 查询失败: {e}")
+            return ""
 
     async def _handle_fallback(self, context: Context, metadata: Dict[str, Any]) -> bool:
         """备用回复处理"""
