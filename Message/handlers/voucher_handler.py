@@ -65,9 +65,15 @@ def _extract_serial(text: str) -> Optional[str]:
 
 
 def _extract_coupon(text: str) -> Optional[str]:
-    """提取拼多多卡券号（10-14位纯数字，排除15位IMEI）"""
+    """提取拼多多卡券号（10-14位纯数字，支持带空格格式，排除15位IMEI）"""
+    # 先尝试连续数字（10-14位）
     for m in re.finditer(r'(?<!\d)(\d{10,14})(?!\d)', text):
         return m.group(1)
+    # 再尝试带空格格式，合并后10-14位
+    for m in re.finditer(r'(\d[\d ]{8,18}\d)', text):
+        candidate = re.sub(r'\s+', '', m.group(1))
+        if 10 <= len(candidate) <= 14:
+            return candidate
     return None
 
 

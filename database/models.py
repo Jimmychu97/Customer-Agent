@@ -50,6 +50,7 @@ class Account(Base):
     username = Column(String(100), nullable=False, comment='登录用户名')
     password = Column(String(255), nullable=False, comment='登录密码')
     cookies = Column(Text, comment='存储登录cookies信息的JSON字符串')
+    proxy = Column(String(255), nullable=True, comment='代理地址，格式：http://user:pass@ip:port')
     status = Column(Integer, default=None, comment='账号状态: None-未验证, 0-休息,1-在线, 3-离线')
 
     # 关联关系 - 多个账号属于一个店铺

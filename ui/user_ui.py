@@ -5,85 +5,38 @@ from typing import Any, Dict, Optional
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, pyqtSignal as Signal, QTimer
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
                             QMessageBox, QDialog, QFormLayout)
-from PyQt6.QtGui import QFont, QPixmap, QPainter, QPainterPath
+from PyQt6.QtGui import QFont, QPixmap
 from qfluentwidgets import (CardWidget, SubtitleLabel, CaptionLabel, BodyLabel,
                            PrimaryPushButton, PushButton, StrongBodyLabel,
                            InfoBadge, ScrollArea, FluentIcon as FIF)
-from database.db_manager import db_manager
+from database import db_manager
 from Channel.pinduoduo.pdd_login import login_pdd
 from utils.logger_loguru import get_logger
-import requests
+from ui.auto_reply.threads import LogoLoaderThread
 
 logger = get_logger("UserUI")
 
-class LogoLoaderThread(QThread):
-    """异步加载Logo的线程"""
-    logo_loaded = pyqtSignal(QPixmap)
-
-    def __init__(self, url):
-        super().__init__()
-        self.url = url
-
-    def run(self):
-        try:
-            response = requests.get(self.url, timeout=10)
-            response.raise_for_status()
-            
-            pixmap = QPixmap()
-            pixmap.loadFromData(response.content)
-
-            if pixmap.isNull():
-                raise ValueError("Loaded data is not a valid image.")
-
-            # 创建圆形pixmap
-            size = 60
-            circular_pixmap = QPixmap(size, size)
-            circular_pixmap.fill(Qt.GlobalColor.transparent)
-
-            painter = QPainter(circular_pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
-            path = QPainterPath()
-            path.addEllipse(0, 0, size, size)
-            
-            painter.setClipPath(path)
-            
-            # 缩放并绘制原始图片
-            scaled_pixmap = pixmap.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-            painter.drawPixmap(0, 0, scaled_pixmap)
-            painter.end()
-
-            self.logo_loaded.emit(circular_pixmap)
-        except Exception as e:
-            logger.warning(f"Logo 加载失败 ({self.url}): {e}")
-            self.logo_loaded.emit(QPixmap())
-
 class LoginThread(QThread):
     """登录验证线程"""
-    login_finished = Signal(object)  # 登录完成信号，传递结果(字典或bool)
-    
+    login_finished = Signal(object)
+
     def __init__(self, account_data):
         super().__init__()
         self.account_data = account_data
-        
+
     def run(self):
-        """在后台线程中执行登录"""
         try:
-            # 创建事件循环
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
-            # 执行登录
             result = loop.run_until_complete(
                 login_pdd(
                     name=self.account_data["username"],
-                    password=self.account_data["password"]
+                    password=self.account_data["password"],
+                    proxy=self.account_data.get("proxy") or None,
                 )
             )
-            
             loop.close()
             self.login_finished.emit(result)
-            
         except Exception as e:
             logger.error(f"登录线程异常: {e}")
             self.login_finished.emit(False)
@@ -483,7 +436,8 @@ class UserManagerWidget(QFrame):
                             "username": account["username"],
                             "password": account["password"],
                             "status": account["status"],
-                            "cookies": account.get("cookies")
+                            "cookies": account.get("cookies"),
+                            "proxy": account.get("proxy"),
                         }
                         self.accounts_data.append(account_data)
             
@@ -676,7 +630,8 @@ class UserManagerWidget(QFrame):
                 username=username,
                 password=result["password"],
                 user_id=result.get("user_id"),
-                cookies=result.get("cookies")
+                cookies=result.get("cookies"),
+                proxy=result.get("proxy"),
             )
 
             if success:
@@ -698,9 +653,10 @@ class UserManagerWidget(QFrame):
                 # 检查密码或状态是否变化
                 username_changed = new_data["username"] != account_data["username"]
                 password_changed = new_data["password"] != account_data["password"]
+                proxy_changed = new_data.get("proxy", "") != account_data.get("proxy", "")
                 status_changed = new_data["status"] != account_data["status"]
 
-                if not (username_changed or password_changed or status_changed):
+                if not (username_changed or password_changed or proxy_changed or status_changed):
                     QMessageBox.information(self, "提示", "账号信息未发生变化。")
                     return
 
@@ -708,14 +664,15 @@ class UserManagerWidget(QFrame):
                 update_status_success = True
 
                 # 如果用户名或密码发生变化，则统一更新
-                if username_changed or password_changed:
+                if username_changed or password_changed or proxy_changed:
                     update_info_success = db_manager.update_account_info(
                         channel_name=new_data["channel_name"],
                         shop_id=new_data["shop_id"],
                         user_id=new_data["user_id"],
                         username=new_data["username"],
                         password=new_data["password"],
-                        cookies=account_data.get("cookies")
+                        cookies=account_data.get("cookies"),
+                        proxy=new_data.get("proxy") or None,
                     )
                 
                 # 如果状态变化，仅更新状态
@@ -829,7 +786,13 @@ class EditAccountDialog(QDialog):
         password_layout.addWidget(self.show_password_btn)
         
         layout.addRow("密码:", password_container)
-        
+
+        # 代理地址
+        self.proxy_edit = LineEdit()
+        self.proxy_edit.setText(self.account_data.get("proxy") or "")
+        self.proxy_edit.setPlaceholderText("不填则不使用代理，格式: http://user:pass@ip:port")
+        layout.addRow("代理:", self.proxy_edit)
+
         # 状态选择
         self.status_combo = ComboBox()
         status_options = [
@@ -893,9 +856,10 @@ class EditAccountDialog(QDialog):
             "channel_name": self.account_data["channel_name"],
             "shop_id": self.account_data["shop_id"],
             "shop_name": self.account_data["shop_name"],
-            "user_id": self.account_data["user_id"],  # 传递user_id
+            "user_id": self.account_data["user_id"],
             "username": self.username_edit.text().strip(),
             "password": self.password_edit.text().strip(),
+            "proxy": self.proxy_edit.text().strip(),
             "status": self.status_combo.currentData()
         }
 
@@ -925,8 +889,12 @@ class AddAccountDialog(QDialog):
         self.password_edit.setEchoMode(LineEdit.EchoMode.Password)
         self.password_edit.setPlaceholderText("请输入密码")
         self.password_edit.setFixedSize(300, 32)
+        self.proxy_edit = LineEdit(self)
+        self.proxy_edit.setPlaceholderText("不填则不使用代理，格式: http://user:pass@ip:port")
+        self.proxy_edit.setFixedSize(300, 32)
         layout.addRow("用户名:", self.username_edit)
         layout.addRow("密码:", self.password_edit)
+        layout.addRow("代理:", self.proxy_edit)
         
         # 按钮
         buttons_widget = QWidget()
@@ -962,5 +930,6 @@ class AddAccountDialog(QDialog):
         """获取账号信息"""
         return {
             "username": self.username_edit.text().strip(),
-            "password": self.password_edit.text().strip()
+            "password": self.password_edit.text().strip(),
+            "proxy": self.proxy_edit.text().strip() or None,
         }

@@ -30,6 +30,24 @@ from playwright.async_api import async_playwright
 from Channel.pinduoduo.utils.API.get_shop_info import GetShopInfo
 from Channel.pinduoduo.utils.API.get_user_info import GetUserInfo
 
+def _parse_proxy_for_playwright(proxy: str) -> dict:
+    """
+    将代理 URL 转换为 Playwright 代理配置格式。
+
+    输入: http://user:pass@ip:port 或 http://ip:port
+    输出: {"server": "http://ip:port", "username": "user", "password": "pass"}
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(proxy)
+    server = f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+    result = {"server": server}
+    if parsed.username:
+        result["username"] = parsed.username
+    if parsed.password:
+        result["password"] = parsed.password
+    return result
+
+
 class PDDLogin():
     def __init__(self,name,password):
         self.logger = get_logger("Pdd_login")
@@ -57,11 +75,12 @@ class PDDLogin():
         except Exception as e:
             self.logger.debug(f"关闭弹窗失败（忽略）: {e}")
 
-    async def login(self, headless=False):
+    async def login(self, headless=False, proxy: str = None):
         """使用账号密码登录
 
         Args:
-            headless: 是否使用无头模式（自动回退时使用 True，避免弹出浏览器窗口）
+            headless: 是否使用无头模式
+            proxy: 代理地址，格式 http://user:pass@ip:port（可选）
         """
         playwright = None
         context = None
@@ -71,8 +90,7 @@ class PDDLogin():
             user_data_dir = str(app_dir / "user_data" / self.name)
             self.logger.debug(f"使用用户数据目录: {user_data_dir}")
 
-            context = await playwright.chromium.launch_persistent_context(
-                user_data_dir,
+            launch_kwargs = dict(
                 headless=headless,
                 args=[
                     '--disable-gpu',
@@ -83,6 +101,13 @@ class PDDLogin():
                     '--disable-web-security',
                     '--disable-features=VizDisplayCompositor'
                 ]
+            )
+            if proxy:
+                launch_kwargs["proxy"] = _parse_proxy_for_playwright(proxy)
+                self.logger.info(f"登录使用代理: {proxy}")
+
+            context = await playwright.chromium.launch_persistent_context(
+                user_data_dir, **launch_kwargs
             )
 
             page = await context.new_page()
@@ -132,8 +157,11 @@ class PDDLogin():
                 except Exception as e:
                     self.logger.debug(f"停止Playwright失败: {e}")
         
-    async def refresh_cookies(self):
+    async def refresh_cookies(self, proxy: str = None):
         """重新获取cookies，使用已保存的用户数据，无需再次登录
+
+        Args:
+            proxy: 代理地址，格式 http://user:pass@ip:port（可选）
 
         Returns:
             str: cookies的JSON字符串，如果失败返回False
@@ -141,22 +169,17 @@ class PDDLogin():
         playwright = None
         context = None
         try:
-            # 启动Playwright
             playwright = await async_playwright().start()
 
-            # 使用相同的用户数据目录（与login保持一致）
             user_data_dir = str(app_dir / "user_data" / self.name)
             self.logger.debug(f"使用用户数据目录刷新cookies: {user_data_dir}")
 
-            # 检查用户数据目录是否存在
             if not os.path.exists(user_data_dir):
                 self.logger.error(f"用户数据目录不存在: {user_data_dir}，请先登录")
                 return False
 
-            # 使用持久化上下文，自动加载用户数据
-            context = await playwright.chromium.launch_persistent_context(
-                user_data_dir,
-                headless=True,  # 刷新cookies时可以使用无头模式
+            launch_kwargs = dict(
+                headless=True,
                 args=[
                     '--disable-gpu',
                     '--no-sandbox',
@@ -166,6 +189,13 @@ class PDDLogin():
                     '--disable-web-security',
                     '--disable-features=VizDisplayCompositor'
                 ]
+            )
+            if proxy:
+                launch_kwargs["proxy"] = _parse_proxy_for_playwright(proxy)
+                self.logger.info(f"刷新Cookie使用代理: {proxy}")
+
+            context = await playwright.chromium.launch_persistent_context(
+                user_data_dir, **launch_kwargs
             )
 
             page = await context.new_page()
@@ -226,19 +256,18 @@ class PDDLogin():
         shop_id, shop_name, mallLogo = result
         return shop_id, shop_name, mallLogo
     
-async def login_pdd(name, password, headless=False):
+async def login_pdd(name, password, headless=False, proxy: str = None):
     """
     使用账号密码登录并返回账号、店铺信息，不直接操作数据库。
-    如果登录成功，返回包含详细信息的字典。
-    如果登录失败，返回 False。
 
     :param name: 用户名
     :param password: 密码
-    :param headless: 是否使用无头模式（默认 False，自动回退时传 True）
+    :param headless: 是否使用无头模式
+    :param proxy: 代理地址，格式 http://user:pass@ip:port（可选）
     :return: dict or bool
     """
     pdd_login = PDDLogin(name=name, password=password)
-    cookies_json = await pdd_login.login(headless=headless)
+    cookies_json = await pdd_login.login(headless=headless, proxy=proxy)
     if not cookies_json:
         pdd_login.logger.error(f"账号 '{name}' 登录失败，未能获取cookies")
         return False
@@ -270,18 +299,17 @@ async def login_pdd(name, password, headless=False):
         pdd_login.logger.error(f"账号 '{name}' 登录成功，但在处理后续信息时出错: {e}")
         return False
 
-async def refresh_pdd_cookies(name, password=None):
+async def refresh_pdd_cookies(name, password=None, proxy: str = None):
     """
     刷新拼多多账号的cookies，使用已保存的用户数据，无需再次输入账号密码。
-    如果刷新成功，返回包含最新cookies的字典。
-    如果刷新失败（如登录状态已失效），返回 False。
 
     :param name: 用户名
-    :param password: 密码（可选，仅用于创建PDDLogin实例）
+    :param password: 密码（可选）
+    :param proxy: 代理地址，格式 http://user:pass@ip:port（可选）
     :return: dict or bool
     """
     pdd_login = PDDLogin(name=name, password=password or "")
-    cookies_json = await pdd_login.refresh_cookies()
+    cookies_json = await pdd_login.refresh_cookies(proxy=proxy)
     
     if not cookies_json:
         pdd_login.logger.error(f"账号 '{name}' cookies刷新失败")

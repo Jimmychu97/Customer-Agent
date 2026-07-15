@@ -46,7 +46,7 @@ class LogoLoaderThread(QThread):
 
             self.logo_loaded.emit(circular_pixmap)
         except Exception as e:
-            get_logger().warning(f"Logo 加载失败 ({self.url}): {e}")
+            get_logger("LogoLoaderThread").warning(f"Logo 加载失败 ({self.url}): {e}")
             self.logo_loaded.emit(QPixmap())
 
 
@@ -135,7 +135,7 @@ class SetStatusThread(QThread):
         super().__init__()
         self.account_data = account_data
         self.target_status = target_status
-        self.logger = get_logger()
+        self.logger = get_logger("SetStatusThread")
 
     def run(self):
         """在后台线程中执行状态更新"""

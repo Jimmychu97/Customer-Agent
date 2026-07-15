@@ -210,5 +210,6 @@ Customer-Agent/
 | 配置 | Pydantic |
 
 ## License
-
+## 代理地址
+http://admin:Asd123123@43.139.22.120:3128
 MIT

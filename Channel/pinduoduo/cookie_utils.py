@@ -40,23 +40,19 @@ def check_cookies_valid(
 ) -> bool:
     """
     通过轻量级 HTTP 请求验证 cookie 是否有效。
-
-    向拼多多 getToken 端点发送 POST 请求，检查响应中是否包含
-    error_code=43001（会话已过期）。
-
-    Args:
-        channel_name: 渠道名称
-        shop_id: 店铺 ID
-        user_id: 用户 ID
-        cookies: cookie 字典
-        timeout: 请求超时（秒）
-
-    Returns:
-        True: cookie 有效（或网络错误无法确定时保守返回 True）
-        False: cookie 已过期
     """
     url = "https://mms.pinduoduo.com/chats/getToken"
     payload = {'version': '3'}
+
+    # 读取账号代理配置
+    proxies = None
+    try:
+        account_info = db_manager.get_account(channel_name, shop_id, user_id)
+        proxy = account_info.get('proxy') if account_info else None
+        if proxy and proxy.strip():
+            proxies = {"http": proxy.strip(), "https": proxy.strip()}
+    except Exception:
+        pass
 
     try:
         response = requests.post(
@@ -65,6 +61,7 @@ def check_cookies_valid(
             headers=_VALIDATION_HEADERS,
             cookies=cookies,
             timeout=timeout,
+            proxies=proxies,
         )
 
         if response.status_code == 200:
@@ -157,19 +154,6 @@ def perform_relogin(
 ) -> bool:
     """
     执行 cookie 刷新/重登，优先刷新，失败时回退到完整登录。
-
-    此函数可从任意上下文调用（同步/异步），内部处理线程隔离。
-
-    Args:
-        channel_name: 渠道名称
-        shop_id: 店铺 ID
-        user_id: 用户 ID
-        username: 用户名
-        password: 密码
-        headless_fallback: 完整登录时是否使用 headless 模式
-
-    Returns:
-        是否成功获取新 cookie
     """
     if not relogin_guard.try_acquire(channel_name, shop_id, user_id):
         logger.info(f"重登已在其他线程进行中或冷却期内: {username}")
@@ -180,19 +164,21 @@ def perform_relogin(
         import importlib
         pdd_login_module = importlib.import_module('Channel.pinduoduo.pdd_login')
 
-        # 阶段 1: 刷新 cookie（headless，利用浏览器持久化会话）
+        # 从数据库取代理配置
+        account_info = db_manager.get_account(channel_name, shop_id, user_id)
+        proxy = account_info.get('proxy') if account_info else None
+
+        # 阶段 1: 刷新 cookie
         logger.info(f"尝试刷新 cookie（无需重新登录）: {username}")
         try:
             refresh_result = run_async_in_thread(
-                pdd_login_module.refresh_pdd_cookies(username, password),
+                pdd_login_module.refresh_pdd_cookies(username, password, proxy=proxy),
                 timeout=60.0,
             )
             if refresh_result and isinstance(refresh_result, dict):
                 new_cookies = refresh_result.get('cookies')
                 if new_cookies:
-                    _apply_cookies_to_cache_and_db(
-                        channel_name, shop_id, user_id, new_cookies
-                    )
+                    _apply_cookies_to_cache_and_db(channel_name, shop_id, user_id, new_cookies)
                     logger.info(f"Cookie 刷新成功: {username}")
                     relogin_guard.release(channel_name, shop_id, user_id, success=True)
                     return True
@@ -208,15 +194,13 @@ def perform_relogin(
         logger.info(f"回退到完整重新登录 (headless={headless_fallback}): {username}")
         try:
             login_result = run_async_in_thread(
-                pdd_login_module.login_pdd(username, password, headless_fallback),
+                pdd_login_module.login_pdd(username, password, headless_fallback, proxy=proxy),
                 timeout=60.0,
             )
             if login_result and isinstance(login_result, dict):
                 new_cookies = login_result.get('cookies')
                 if new_cookies:
-                    _apply_cookies_to_cache_and_db(
-                        channel_name, shop_id, user_id, new_cookies
-                    )
+                    _apply_cookies_to_cache_and_db(channel_name, shop_id, user_id, new_cookies)
                     logger.info(f"完整重新登录成功: {username}")
                     relogin_guard.release(channel_name, shop_id, user_id, success=True)
                     return True

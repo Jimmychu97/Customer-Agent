@@ -131,11 +131,12 @@ class AutoReplyManager:
     def stop_all(self):
         """停止所有自动回复"""
         try:
-            for account_key, thread in self.running_accounts.items():
+            threads = list(self.running_accounts.values())
+            for thread in threads:
                 if thread.is_running():
                     thread.stop()
 
-            for thread in self.running_accounts.values():
+            for thread in threads:
                 thread.wait(5000)
 
             self.running_accounts.clear()

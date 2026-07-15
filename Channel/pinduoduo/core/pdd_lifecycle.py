@@ -165,13 +165,38 @@ class LifecycleMixin:
 
             self.logger.debug(f"正在连接到拼多多 WebSocket: {shop_id}-{username}")
 
-            async with websockets.connect(
-                full_url,
+            # 读取账号代理配置
+            account_info = db_manager.get_account(self.channel_name, shop_id, user_id)
+            proxy = account_info.get('proxy') if account_info else None
+            proxy = proxy.strip() if proxy and proxy.strip() else None
+
+            ws_kwargs = dict(
                 ping_interval=None,
                 max_size=10**7,
                 compression=None,
-                close_timeout=10
-            ) as websocket:
+                close_timeout=10,
+            )
+            if proxy:
+                from python_socks.async_.asyncio import Proxy as SocksProxy
+                import ssl
+                from urllib.parse import urlparse
+
+                parsed_ws = urlparse(full_url)
+                ws_host = parsed_ws.hostname
+                ws_port = parsed_ws.port or 443
+
+                proxy_obj = SocksProxy.from_url(proxy)
+                raw_sock = await proxy_obj.connect(dest_host=ws_host, dest_port=ws_port)
+
+                ssl_ctx = ssl.create_default_context()
+                ws_kwargs['sock'] = raw_sock
+                ws_kwargs['ssl'] = ssl_ctx
+                ws_kwargs['server_hostname'] = ws_host
+                self.logger.info(f"账号 {username} WebSocket 接收使用代理: {proxy}")
+            else:
+                self.logger.info(f"账号 {username} WebSocket 接收未使用代理（直连）")
+
+            async with websockets.connect(full_url, **ws_kwargs) as websocket:
                 self.ws = websocket
                 self.resource_manager.register_websocket(
                     websocket,

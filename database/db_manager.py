@@ -32,9 +32,26 @@ class DatabaseManager:
         # 创建表结构
         Base.metadata.create_all(self.engine)
 
+        # 迁移：为旧数据库补充 proxy 列
+        self._migrate_add_proxy_column()
+
         self.logger = get_logger()
-        # 初始化数据库
         self.init_db()
+
+    def _migrate_add_proxy_column(self):
+        """为旧数据库的 accounts 表补充 proxy 列（幂等）"""
+        try:
+            with self.engine.connect() as conn:
+                cols = [row[1] for row in conn.execute(
+                    __import__('sqlalchemy').text("PRAGMA table_info(accounts)")
+                )]
+                if 'proxy' not in cols:
+                    conn.execute(__import__('sqlalchemy').text(
+                        "ALTER TABLE accounts ADD COLUMN proxy VARCHAR(255)"
+                    ))
+                    conn.commit()
+        except Exception:
+            pass
 
     def init_db(self):
         """初始化渠道信息"""
@@ -229,7 +246,7 @@ class DatabaseManager:
             return True
 
     # ==================== 账号相关操作 ====================
-    def add_account(self, channel_name: str, shop_id: str, user_id: str, username: str, password: str, cookies: str = None) -> bool:
+    def add_account(self, channel_name: str, shop_id: str, user_id: str, username: str, password: str, cookies: str = None, proxy: str = None) -> bool:
         """添加账号"""
         with self.session_scope() as session:
             channel = self._get_channel(session, channel_name)
@@ -250,6 +267,7 @@ class DatabaseManager:
                 username=username,
                 password=password,
                 cookies=cookies,
+                proxy=proxy,
                 status=None
             )
             session.add(account)
@@ -278,10 +296,11 @@ class DatabaseManager:
                 'username': account.username,
                 'password': account.password,
                 'cookies': account.cookies,
+                'proxy': account.proxy,
                 'status': account.status
             }
 
-    def update_account_info(self, channel_name: str, shop_id: str, user_id: str, username: Optional[str] = None, password: Optional[str] = None, cookies: Optional[str] = None, status: Optional[int] = None) -> bool:
+    def update_account_info(self, channel_name: str, shop_id: str, user_id: str, username: Optional[str] = None, password: Optional[str] = None, cookies: Optional[str] = None, proxy: Optional[str] = None, status: Optional[int] = None) -> bool:
         """更新账号信息"""
         with self.session_scope() as session:
             channel = self._get_channel(session, channel_name)
@@ -302,6 +321,8 @@ class DatabaseManager:
                 account.password = password
             if cookies is not None:
                 account.cookies = cookies
+            if proxy is not None:
+                account.proxy = proxy
             if status is not None:
                 account.status = status
             self.logger.info(f"成功更新账号信息: {username} (用户ID: {user_id})")
@@ -325,6 +346,7 @@ class DatabaseManager:
                     'username': account.username,
                     'password': account.password,
                     'cookies': account.cookies,
+                    'proxy': account.proxy,
                     'status': account.status
                 }
                 for account in accounts
@@ -333,19 +355,14 @@ class DatabaseManager:
     def get_all_accounts_with_details(self) -> List[Dict[str, Any]]:
         """
         批量获取所有账号及其关联的店铺和渠道信息（减少N+1查询）
-
-        Returns:
-            List[Dict]: 包含 channel_name, shop_id, shop_name, shop_logo, username, password, status, user_id, cookies
         """
         with self.session_scope() as session:
-            # 使用 join 一次性查询所有数据
             results = (
                 session.query(Account, Shop, Channel)
                 .join(Shop, Account.shop_id == Shop.id)
                 .join(Channel, Shop.channel_id == Channel.id)
                 .all()
             )
-
             return [
                 {
                     'channel_name': channel.channel_name,
@@ -356,7 +373,8 @@ class DatabaseManager:
                     'password': account.password,
                     'status': account.status,
                     'user_id': account.user_id,
-                    'cookies': account.cookies
+                    'cookies': account.cookies,
+                    'proxy': account.proxy,
                 }
                 for account, shop, channel in results
             ]

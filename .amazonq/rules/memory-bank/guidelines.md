@@ -1,128 +1,226 @@
 # Development Guidelines
 
-## Code Quality Standards
+## Code Style & Conventions
 
 ### Module Docstrings
-每个模块顶部必须有三引号文档字符串，说明模块职责：
+Every module starts with a triple-quoted docstring describing its purpose. Multi-line docstrings are common for complex modules:
 ```python
 """
-模块功能描述
+自定义 Agent 工具系统
 
-关键说明或注意事项
+提供 @agent_tool 装饰器、全局工具注册表、LLM 工具格式转换和工具执行能力。
 """
 ```
 
-### `__init__.py` 模式
-- 空 `__init__.py`：纯命名空间包（如 `Agent/`, `Agent/CustomerAgent/`）
-- 导出型 `__init__.py`：显式声明 `__all__`，通过相对导入聚合子模块公共 API：
+### Class Docstrings
+Classes include a docstring summarizing responsibilities. For complex classes, list sub-responsibilities:
 ```python
-from .base import BaseHandler
-from .ai_handler import AIReplyHandler
+class CustomerAgent(Bot):
+    """
+    自定义客服 Agent
 
-__all__ = ['BaseHandler', 'AIReplyHandler']
+    核心循环：
+    1. 加载历史消息
+    2. 检查上下文压缩
+    ...
+    职责已分离到子模块：
+    - AgentConfig: 配置管理
+    """
 ```
-- DI 代理型 `__init__.py`：通过 `_create_proxy` 提供向后兼容的模块级单例：
+
+### Naming Conventions
+- Classes: `PascalCase` (e.g., `CustomerAgent`, `BaseHandler`, `DIContainer`)
+- Functions/methods: `snake_case` (e.g., `get_tools_for_llm`, `async_reply`)
+- Private methods: `_snake_case` prefix (e.g., `_run_agent_loop`, `_get_instance`)
+- Constants: `UPPER_SNAKE_CASE` (e.g., `TOOL_REGISTRY`, `SESSION_EXPIRED_ERROR_CODE`)
+- Module-level singletons: `snake_case` (e.g., `queue_manager`, `db_manager`, `container`)
+
+### Type Annotations
+All public methods and functions use full type annotations. `Optional`, `Dict`, `List`, `Any` from `typing` are used (Python 3.9+ generics also acceptable):
 ```python
-from core.service_providers import _create_proxy
-db_manager = _create_proxy(DatabaseManager)
+def execute_tool(name: str, arguments: str, dependencies: Dict[str, str]) -> str:
+async def async_reply(self, query: str, context: Context = None) -> Reply:
 ```
 
-### 类命名与结构
-- 类名使用 PascalCase，文件名使用 snake_case
-- 每个类有简短的类级文档字符串说明职责
-- 子组件使用延迟初始化（`Optional[Type] = None`），在 `initialize_async()` 中赋值
+### `__all__` in `__init__.py`
+Public packages define `__all__` to control exports:
+```python
+__all__ = ['BaseHandler', 'AIReplyHandler', 'MessagePreprocessor', 'BusinessHoursHandler']
+```
 
-### 日志规范
-统一使用 `utils.logger_loguru` 中的 `get_logger`，**不直接使用 `logging` 模块**：
+---
+
+## Architectural Patterns
+
+### Logger Initialization
+Every class initializes a logger in `__init__` using the class name:
 ```python
 from utils.logger_loguru import get_logger
-logger = get_logger("ModuleName")  # 模块级 logger
-# 或在类中
-self.logger = get_logger("ClassName")
+
+class MyClass:
+    def __init__(self):
+        self.logger = get_logger(self.__class__.__name__)
 ```
-日志内容截断保护隐私（内容预览限 50 字符）：
+Module-level loggers (outside classes) use a descriptive name:
 ```python
-content_preview = str(context.content)[:50] + "..." if context.content else ""
+logger = get_logger("agent_tools")
 ```
 
----
-
-## Dependency Injection Pattern
-
-### 服务注册（`core/di_container.py`）
-所有核心服务通过 DI 容器统一管理，在 `app.py` 最早期调用 `configure_standard_services()`：
-```python
-from core.di_container import configure_standard_services
-configure_standard_services(_app_config)
-```
-
-注册方式：
-```python
-container.register_singleton(ServiceType, factory=lambda: ServiceType())
-container.register_transient(ServiceType, implementation_type=ConcreteType)
-```
-
-获取服务：
+### Dependency Injection via DI Container
+Services are registered in `core/di_container.py` and retrieved via `container.get(ServiceType)`. Prefer DI over direct instantiation for shared services:
 ```python
 from core.di_container import container
-instance = container.get(ServiceType)
+from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
+bot = container.get(CustomerAgent)
+```
+Module-level singletons (queue_manager, cache_manager) are imported directly without DI.
+
+### DI Proxy for Backward Compatibility
+Shared services expose a `_DIProxy` so existing `from module import singleton` imports work unchanged:
+```python
+# database/__init__.py
+db_manager = _create_proxy(DatabaseManager)
+# Usage anywhere:
+from database import db_manager
+db_manager.get_account(...)
 ```
 
-### 双重检查锁定（线程安全单例）
+### Lazy Imports to Break Circular Dependencies
+Use `importlib.import_module()` or deferred imports inside functions/methods when circular imports would otherwise occur:
 ```python
-if key in self._singletons:
-    return self._singletons[key]
+def _relogin_and_update_cookies(self) -> bool:
+    pdd_login_module = importlib.import_module('Channel.pinduoduo.pdd_login')
+    ...
+```
+Also used with inline `import` inside methods:
+```python
+async def _send_reply(self, context, reply, metadata):
+    from Channel.pinduoduo.utils.API.send_message import SendMessage
+    sender = SendMessage(shop_id, user_id)
+```
+
+### Async/Sync Bridge
+Use `run_async_in_thread()` from `utils/async_helper.py` to run async coroutines from synchronous code without event loop conflicts:
+```python
+from utils.async_helper import run_async_in_thread
+
+result = run_async_in_thread(some_async_func(), timeout=60.0)
+```
+
+### Handler Chain Pattern
+Message handlers extend `BaseHandler` (which extends `MessageHandler`) and implement two methods:
+```python
+class MyHandler(BaseHandler):
+    def can_handle(self, context: Context) -> bool:
+        return context.type in self.supported_types
+
+    async def handle(self, context: Context, metadata: Dict[str, Any]) -> bool:
+        # return True = handled, False = pass to next handler
+        ...
+```
+
+### Agent Tool Registration via Decorator
+Tools are registered at import time using `@agent_tool`. Each tool defines a Pydantic param model:
+```python
+from pydantic import BaseModel, Field
+from Agent.CustomerAgent.custom.tool_decorator import agent_tool
+
+class SendGoodsParams(BaseModel):
+    recipient_uid: str = Field(description="接收消息的用户UID")
+    goods_id: int = Field(description="商品ID")
+
+@agent_tool(
+    name="send_goods_link",
+    description="向用户发送商品卡片链接",
+    param_model=SendGoodsParams,
+)
+def send_goods_link(params: SendGoodsParams) -> str:
+    ...
+```
+Tools are imported in `customer_agent.py` with `# noqa: F401` comments to trigger registration:
+```python
+from Agent.CustomerAgent.tools import send_goods_link  # noqa: F401 — 注册 send_goods_link 工具
+```
+
+### Pydantic Models for Data Contracts
+Use Pydantic `BaseModel` for all data transfer objects, API responses, and config models:
+```python
+from pydantic import BaseModel, Field
+
+class Context(BaseModel):
+    type: ContextType = Field(..., description="上下文类型")
+    content: Optional[str] = Field(None, description="内容")
+    kwargs: Any = Field(default_factory=dict)
+```
+Config models use `ConfigDict(arbitrary_types_allowed=True)` when needed.
+
+### Enums as String Enums
+Use `str, Enum` for enums that are serialized or compared to strings:
+```python
+class ContextType(str, Enum):
+    TEXT = "text"
+    IMAGE = "image"
+
+    def __str__(self):
+        return self.value
+```
+
+### Thread Safety
+Use `threading.RLock()` for shared mutable state. Apply double-checked locking for singleton creation:
+```python
+self._lock = threading.RLock()
+
 with self._lock:
-    if key in self._singletons:  # 二次检查
-        return self._singletons[key]
-    instance = factory()
-    self._singletons[key] = instance
+    if key not in self._singletons:
+        instance = factory()
+        self._singletons[key] = instance
 ```
 
----
-
-## Async Patterns
-
-### 异步初始化
-组件使用 `initialize_async()` 延迟初始化，避免构造函数中执行 IO：
-```python
-async def initialize_async(self) -> bool:
-    if self._is_initialized:
-        return True
-    try:
-        # ... 初始化逻辑
-        self._is_initialized = True
-        return True
-    except Exception as e:
-        logger.error(f"初始化失败: {e}")
-        return False
-```
-
-### 延迟初始化调用点
+### Delayed Initialization Pattern
+Complex components use a `_is_initialized` flag and an `initialize_async()` method called lazily on first use:
 ```python
 async def async_reply(self, query: str, context: Context = None) -> Reply:
     if not self._is_initialized:
         if not await self.initialize_async():
-            return Reply(ReplyType.TEXT, "初始化失败，请检查配置。")
+            return Reply(ReplyType.TEXT, "初始化失败")
+    ...
 ```
-
-### 并行工具执行
-多个工具调用使用 `asyncio.gather` 并行执行（见 `ToolExecutor.execute_parallel`）。
 
 ---
 
-## Configuration Pattern
+## Error Handling
 
-### 访问配置
-使用点号分隔的嵌套键访问：
+### Broad Exception Catch with Logging
+All `async def handle()` methods wrap their body in `try/except Exception` and log errors:
 ```python
-from config import config
-value = config.get('llm.api_key', default='')
-config.set('llm.api_key', 'new_value', save=True)
+async def handle(self, context: Context, metadata: Dict[str, Any]) -> bool:
+    try:
+        ...
+        return True
+    except Exception as e:
+        self.logger.error(f"处理失败: {e}")
+        return await self._handle_fallback(context, metadata)
 ```
 
-### 原子保存
-配置保存使用临时文件 + `Path.replace()` 原子重命名，防止写入中断导致损坏：
+### Graceful Fallback
+Handlers provide fallback replies rather than propagating exceptions to users.
+
+### Specific Exception Types for Config
+Config errors use a custom hierarchy: `ConfigError` → `ConfigFileNotFoundError`, `ConfigParseError`, `ConfigValidationError`.
+
+---
+
+## Specific Idioms
+
+### Content Preview in Logs (Privacy Protection)
+Truncate content in logs to avoid logging full user messages:
+```python
+content_preview = str(context.content)[:50] + "..." if context.content else ""
+self.logger.info(f"{self.name} {action} - {user_info} - {content_preview}")
+```
+
+### Atomic Config Save
+Config is saved via temp file + rename to prevent corruption:
 ```python
 temp_path = self.config_path.with_suffix('.tmp')
 with open(temp_path, 'w', encoding='utf-8') as f:
@@ -130,110 +228,17 @@ with open(temp_path, 'w', encoding='utf-8') as f:
 temp_path.replace(self.config_path)
 ```
 
-### Pydantic 配置模型
-所有配置段使用 Pydantic `BaseModel` 定义，带 `Field(default=..., description=...)`：
+### Dot-Notation Config Access
+Config supports nested key access with dot notation:
 ```python
-class LLMConfig(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    api_key: str = Field(default="", description="API密钥")
+config.get("llm.api_key")   # reads config["llm"]["api_key"]
+config.set("llm.model_name", "deepseek-chat", save=True)
 ```
 
----
-
-## Handler Chain Pattern
-
-### 处理器基类
-所有消息处理器继承 `BaseHandler`（继承自 `MessageHandler`）：
+### Section Separators in Long Files
+Use `# ===...===` comment blocks to visually separate major sections:
 ```python
-class MyHandler(BaseHandler):
-    def __init__(self, name: Optional[str] = None):
-        super().__init__()
-        self.name = name or self.__class__.__name__
+# ==============================================================================
+# 工具注册表
+# ==============================================================================
 ```
-
-### 统一日志方法
-处理器使用 `log_message()` 记录操作，不直接记录完整消息内容：
-```python
-await self.log_message(context, "处理完成", extra_info="附加信息")
-```
-
----
-
-## Import Conventions
-
-### 避免循环依赖
-业务模块间使用函数内延迟导入（lazy import）：
-```python
-def some_method(self):
-    from database.knowledge_service import KnowledgeService  # 延迟导入
-    service = KnowledgeService()
-```
-
-### 工具注册触发
-Agent 工具通过导入触发 `@agent_tool` 装饰器注册，使用 `# noqa: F401` 注释：
-```python
-from Agent.CustomerAgent.tools import (
-    send_goods_link,   # noqa: F401  — 注册 send_goods_link 工具
-    move_conversation, # noqa: F401  — 注册 transfer_conversation 工具
-)
-```
-
-### 向后兼容重导出
-废弃模块保留原有导入路径，通过重导出维持兼容性：
-```python
-# utils/logging_context.py - 向后兼容而保留
-from utils.logger_loguru import log_with_ctx, format_conn_key
-__all__ = ["log_with_ctx", "format_conn_key"]
-```
-
----
-
-## Error Handling
-
-### 降级策略
-关键路径失败时提供降级回复，不抛出异常到上层：
-```python
-except Exception as e:
-    logger.error(f"操作失败: {e}")
-    return Reply(ReplyType.TEXT, "抱歉，我现在无法回复，请稍后再试。")
-```
-
-### 用户信息提取防御
-访问 context 属性时使用 `getattr` + `hasattr` 防御：
-```python
-def _get_user_info(self, context: Context) -> str:
-    try:
-        if hasattr(context, 'kwargs') and context.kwargs:
-            from_uid = getattr(context.kwargs, 'from_uid', None)
-        return "用户:unknown"
-    except Exception:
-        return "用户:unknown"
-```
-
----
-
-## Agent Loop Pattern
-
-CustomerAgent 的核心循环结构（`_run_agent_loop`）：
-1. 调用 LLM（`llm_client.chat`）
-2. 无 tool_calls → 返回内容
-3. 有 tool_calls → 保存 assistant 消息
-4. 检查循环上限（`max_loops`），超限强制结束
-5. 并行执行工具（`tool_executor.execute_parallel`）
-6. 将工具结果追加到 messages
-7. 回到步骤 1
-
-Session ID 格式：`{channel_type.value}{from_uid}`，降级时使用 `fallback_{hash}`。
-
----
-
-## Naming Conventions
-
-| 类型 | 规范 | 示例 |
-|------|------|------|
-| 类 | PascalCase | `CustomerAgent`, `DIContainer` |
-| 函数/方法 | snake_case | `async_reply`, `get_logger` |
-| 常量 | UPPER_SNAKE_CASE | `DEFAULT_MAX_LOOPS`, `DEFAULT_TOKEN_WINDOW` |
-| 私有属性 | 单下划线前缀 | `self._config`, `self._lock` |
-| 模块文件 | snake_case | `customer_agent.py`, `di_container.py` |
-| 中文注释 | 优先使用中文 | 所有注释和文档字符串使用中文 |

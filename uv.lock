@@ -27,6 +27,7 @@ dependencies = [
     { name = "pyqt6" },
     { name = "pyqt6-fluent-widgets" },
     { name = "python-docx" },
+    { name = "python-socks" },
     { name = "requests" },
     { name = "sqlalchemy" },
     { name = "tiktoken" },
@@ -58,6 +59,7 @@ requires-dist = [
     { name = "pyqt6", specifier = ">=6.9.0" },
     { name = "pyqt6-fluent-widgets", specifier = ">=1.9.0" },
     { name = "python-docx", specifier = ">=1.2.0" },
+    { name = "python-socks", extras = ["asyncio"], specifier = ">=2.8.2" },
     { name = "requests", specifier = ">=2.28.0" },
     { name = "sqlalchemy", specifier = ">=2.0.43" },
     { name = "tiktoken", specifier = ">=0.12.0" },
@@ -4251,6 +4253,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a9/f7/eddfe33871520adab45aaa1a71f0402a2252050c14c7e3009446c8f4701c/python_docx-1.2.0.tar.gz", hash = "sha256:7bc9d7b7d8a69c9c02ca09216118c86552704edc23bac179283f2e38f86220ce", size = 5723256, upload-time = "2025-06-16T20:46:27.921Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d0/00/1e03a4989fa5795da308cd774f05b704ace555a70f9bf9d3be057b680bcf/python_docx-1.2.0-py3-none-any.whl", hash = "sha256:3fd478f3250fbbbfd3b94fe1e985955737c145627498896a8a6bf81f4baf66c7", size = 252987, upload-time = "2025-06-16T20:46:22.506Z" },
+]
+
+[[package]]
+name = "python-socks"
+version = "2.8.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/db/ad/5bbfab3d3a266963cca0c09e23a725bbf5f0535d21c8bd1d5272e4430771/python_socks-2.8.2.tar.gz", hash = "sha256:ffc493951854fa3fc0551e0434a09a7b9f9047f9ad666dce42cb94a52e8a34b6", size = 39656, upload-time = "2026-06-23T05:22:01.994Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3d/18/23b981b1cf58c1e7b7e36fa1392daf12878b6a3c26c5e4248601647a6d09/python_socks-2.8.2-py3-none-any.whl", hash = "sha256:7cf785d0631e0659384a773b3c402bc22cccdc23894ba1d65f8524748ace1193", size = 55501, upload-time = "2026-06-23T05:22:00.658Z" },
 ]
 
 [[package]]

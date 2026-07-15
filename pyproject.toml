@@ -26,6 +26,7 @@ dependencies = [
     "tiktoken>=0.12.0",
     "jieba>=0.42.1",
     "xlrd>=2.0.2",
+    "python-socks[asyncio]>=2.8.2",
 ]
 
 [project.optional-dependencies]

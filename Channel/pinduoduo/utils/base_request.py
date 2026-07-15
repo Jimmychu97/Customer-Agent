@@ -12,8 +12,8 @@ from database import db_manager
 import importlib
 
 
-def _make_session() -> requests.Session:
-    """创建带自动重试的独立 Session，强制直连不走系统代理"""
+def _make_session(proxy: str = None) -> requests.Session:
+    """创建带自动重试的独立 Session，支持代理"""
     session = requests.Session()
     retry = Retry(
         total=3,
@@ -25,8 +25,10 @@ def _make_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry, pool_connections=2, pool_maxsize=10)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    # 强制直连：防止服务器上识别到失效代理导致请求失败
-    session.proxies = {"http": "", "https": ""}
+    if proxy:
+        session.proxies = {"http": proxy, "https": proxy}
+    else:
+        session.proxies = {"http": "", "https": ""}
     return session
 
 
@@ -82,58 +84,45 @@ class BaseRequest:
             'priority': 'u=1, i'
         }
         
-        # 每个实例独立的 Session，隔离连接池，避免多账号并发时互相干扰
-        self._session = _make_session()
-
-        # 初始化账户信息和cookies
+        # 初始化账户信息和cookies（proxy 需先于 Session 初始化）
         self.cookies = {}
         self.account_name = "未知账号"
-        
+        self.proxy: Optional[str] = None
+
         if shop_id and user_id:
             self._init_account_info()
+
+        # 每个实例独立的 Session，隔离连接池，避免多账号并发时互相干扰
+        # proxy 在 _init_account_info 中已加载，此处直接使用
+        self._session = _make_session(self.proxy)
     
-    def _init_account_info(self):
-        """初始化账户信息，优先从共享缓存读取 cookie"""
-        from Channel.pinduoduo.cookie_cache import cookie_cache
+    def _init_account_info(self) -> None:
+        """从数据库加载账号的 cookies、proxy 和账号名"""
+        account_info = db_manager.get_account(self.channel_name, self.shop_id, self.user_id)
+        if not account_info:
+            self.logger.warning(f"_init_account_info: 未找到账号 shop_id={self.shop_id}, user_id={self.user_id}")
+            return
 
-        try:
-            # 优先从共享缓存获取 cookie
-            cached = cookie_cache.get(self.channel_name, self.shop_id, self.user_id)
-            if cached is not None:
-                self.cookies = cached
-                # 仍需从 DB 获取账户名
-                account_info = db_manager.get_account(self.channel_name, self.shop_id, self.user_id)
-                if account_info:
-                    self.account_name = account_info.get('username', '未知账号')
-                return
+        self.account_name = account_info.get('username', '未知账号')
 
-            # 缓存未命中，从 DB 加载
-            account_info = db_manager.get_account(self.channel_name, self.shop_id, self.user_id)
-            if account_info:
-                self.account_name = account_info.get('username', '未知账号')
-                cookies_data = account_info.get('cookies')
+        # 加载 cookies
+        raw_cookies = account_info.get('cookies')
+        if isinstance(raw_cookies, str):
+            try:
+                self.cookies = json.loads(raw_cookies)
+            except json.JSONDecodeError:
+                self.logger.warning(f"账号 {self.account_name} cookies JSON 解析失败")
+        elif isinstance(raw_cookies, dict):
+            self.cookies = raw_cookies
 
-                # 处理cookies格式
-                if isinstance(cookies_data, str):
-                    try:
-                        self.cookies = json.loads(cookies_data)
-                    except json.JSONDecodeError:
-                        self.logger.error(f"解析账号 {self.account_name} 的cookies失败")
-                        self.cookies = {}
-                elif isinstance(cookies_data, dict):
-                    self.cookies = cookies_data
-                else:
-                    self.logger.warning(f"账号 {self.account_name} 的cookies为空")
-                    self.cookies = {}
+        # 加载代理
+        proxy = account_info.get('proxy')
+        if proxy and proxy.strip():
+            self.proxy = proxy.strip()
+            self.logger.info(f"账号 {self.account_name} HTTP请求使用代理: {self.proxy}")
+        else:
+            self.logger.info(f"账号 {self.account_name} HTTP请求未使用代理（直连）")
 
-                # 写入共享缓存
-                if self.cookies:
-                    cookie_cache.set(self.channel_name, self.shop_id, self.user_id, self.cookies)
-            else:
-                self.logger.error(f"无法在数据库中找到账户: shop_id={self.shop_id}, user_id={self.user_id}")
-        except Exception as e:
-            self.logger.error(f"初始化账户信息失败: {str(e)}")
-    
     def _is_session_expired(self, response_data: Dict[str, Any]) -> bool:
         """
         检测会话是否过期
@@ -227,7 +216,7 @@ class BaseRequest:
 
             try:
                 refresh_result = self._run_async_login_func(
-                    pdd_login_module.refresh_pdd_cookies, username, password
+                    pdd_login_module.refresh_pdd_cookies, username, password, self.proxy
                 )
 
                 if refresh_result and isinstance(refresh_result, dict):
@@ -255,7 +244,7 @@ class BaseRequest:
 
             try:
                 login_result = self._run_async_login_func(
-                    pdd_login_module.login_pdd, username, password, True
+                    pdd_login_module.login_pdd, username, password, True, self.proxy
                 )
 
                 if login_result and isinstance(login_result, dict):
@@ -470,7 +459,8 @@ class BaseRequest:
 
     def _log_request(self, method: str, url: str, **kwargs):
         """记录请求日志（自动脱敏敏感字段）"""
-        self.logger.debug(f"发起{method}请求: {url}")
+        proxy_info = f" [代理: {self.proxy}]" if self.proxy else " [直连]"
+        self.logger.info(f"账号 {self.account_name} 发起{method}请求: {url}{proxy_info}")
         if 'data' in kwargs or 'json' in kwargs:
             params = kwargs.get('data') or kwargs.get('json')
             self.logger.debug(f"请求参数: {self._sanitize_for_log(params)}")
