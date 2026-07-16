@@ -570,11 +570,11 @@ class VoucherDetectionHandler(BaseHandler):
                     await self._send(shop_id, user_id, from_uid, voucher_success_text)
                 return
 
-            gsx_key = self._get_gsx_key(goods_id, spec)
+            query_cfg = self._get_query_config(goods_id, spec)
             with db_manager.session_scope() as session:
                 order = session.query(Order).filter_by(id=order_id).first()
                 if order:
-                    order.sku_id = gsx_key or ""
+                    order.sku_id = query_cfg.get("server_id") or ""
                     order.gsx_result = json.dumps(gsx_data, ensure_ascii=False)
 
             gsx_text = _format_gsx_result(gsx_data)
