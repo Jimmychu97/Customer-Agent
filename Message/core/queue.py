@@ -108,6 +108,11 @@ class SimpleMessageQueue:
         if not self._deduplication_cache:
             return False
 
+        # 图片/视频消息不去重，每张图片都需要独立处理
+        from bridge.context import ContextType
+        if wrapper.context.type in (ContextType.IMAGE, ContextType.VIDEO):
+            return False
+
         content_str = str(wrapper.context.content) if wrapper.context.content is not None else ""
         content_hash = hashlib.md5(content_str.encode("utf-8")).hexdigest()
         if content_hash in self._deduplication_cache:

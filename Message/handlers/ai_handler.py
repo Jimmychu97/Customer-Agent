@@ -3,11 +3,13 @@ AI回复处理器
 专注的AI处理，移除复杂预处理和发送逻辑
 """
 
+import asyncio
 from typing import Dict, Any, Optional
 from bridge.context import Context, ContextType
 from .base import BaseHandler
 from .preprocessor import MessagePreprocessor
 from Agent.bot import Bot
+
 
 
 class AIReplyHandler(BaseHandler):
@@ -46,7 +48,22 @@ class AIReplyHandler(BaseHandler):
         try:
             # 图片/视频消息直接回固定文字，不走 AI
             if context.type == ContextType.IMAGE:
-                reply = "亲，收到图片啦！😊 不过我无法识别图片内容哦～\n\n请直接把以下信息复制发给我，方便帮您处理：\n📱 手机序列号（设置→通用→关于本机→序列号）\n📱 或 IMEI码（拨号输入 *#06# 即可显示）\n🎫 商品卡券（待收货→点击商品→查看卡券→复制卡券）\n\n谢谢您的配合！✨"
+                from config import config as _cfg
+                if not _cfg.get("business_hours.image_reply_enabled", True):
+                    reply = "亲，我无法识别图片内容哦～😊 请直接用文字描述您的问题，我来帮您解答！"
+                    return await self._send_reply(context, reply, metadata)
+
+                # 先发等待提示
+                await self._send_reply(context, "好的，正在识别图片内容，请耐心等待....（10-20秒）😊", metadata)
+
+                image_url = self._extract_image_url(context.content)
+                if image_url:
+                    reply = await self._get_ai_reply_with_image(image_url, context, metadata)
+                    if reply is None:
+                        return True  # 核销处理器已接管
+                    if reply:
+                        return await self._send_reply(context, reply, metadata)
+                reply = "亲，图片读取失败了～😅 请直接把序列号/IMEI码或卡券号以文字发给我哦！"
                 return await self._send_reply(context, reply, metadata)
 
             if context.type == ContextType.VIDEO:
@@ -83,6 +100,61 @@ class AIReplyHandler(BaseHandler):
             self.logger.error(f"AI回复处理失败: {e}")
             return await self._handle_fallback(context, metadata)
 
+    def _extract_image_url(self, content: Optional[str]) -> Optional[str]:
+        """从图片消息 content 中提取图片 URL"""
+        if not content:
+            return None
+        try:
+            import json
+            data = json.loads(content) if isinstance(content, str) else content
+            if isinstance(data, dict):
+                return data.get("url") or data.get("thumb_url")
+            if isinstance(data, str) and data.startswith("http"):
+                return data
+        except Exception:
+            if isinstance(content, str) and content.startswith("http"):
+                return content
+        return None
+
+    async def _get_ai_reply_with_image(self, image_url: str, context: Context, metadata: Dict[str, Any] = None) -> Optional[str]:
+        """图片识别：调用专用接口（不走工具循环），识别后检查是否含核销信息"""
+        if not self.bot:
+            return None
+        try:
+            # 使用专用图片识别接口，不走 Agent 工具循环
+            if not hasattr(self.bot, 'recognize_image'):
+                return None
+            recognized_text = await self.bot.recognize_image(image_url, context)
+
+            if not recognized_text:
+                return None
+
+            self.logger.info(f"[图片识别] LLM识别结果: {recognized_text!r}")
+
+            if metadata:
+                from Message.handlers.voucher_handler import (
+                    _extract_imei, _extract_serial, _extract_coupon, VoucherDetectionHandler
+                )
+                sn = _extract_imei(recognized_text) or _extract_serial(recognized_text)
+                coupon = _extract_coupon(recognized_text, exclude_imei=sn)
+                self.logger.info(f"[图片识别] 提取结果 sn={sn!r} coupon={coupon!r}")
+                if sn or coupon:
+                    self.logger.info("[图片识别] 转交 VoucherDetectionHandler 处理")
+                    voucher_context = Context(
+                        type=ContextType.TEXT,
+                        content=recognized_text,
+                        channel_type=context.channel_type,
+                        kwargs=context.kwargs,
+                    )
+                    await VoucherDetectionHandler().handle(voucher_context, metadata)
+                    return None  # 核销处理器已发送消息
+                self.logger.info("[图片识别] 未检测到核销信息，走普通AI回复")
+
+            return recognized_text
+        except Exception as e:
+            self.logger.warning(f"LLM 图片识别失败: {e}")
+        return None
+
     async def _get_ai_reply(self, query: str, context: Context) -> Optional[str]:
         """获取AI回复"""
         if not self.bot:
@@ -107,7 +179,6 @@ class AIReplyHandler(BaseHandler):
     async def _send_reply(self, context: Context, reply: str, metadata: Dict[str, Any]) -> bool:
         """发送回复"""
         try:
-            # 从metadata中提取必要信息
             shop_id = metadata.get('shop_id')
             user_id = metadata.get('user_id')
             from_uid = metadata.get('from_uid')
@@ -116,13 +187,14 @@ class AIReplyHandler(BaseHandler):
                 self.logger.warning(f"缺少发送信息: shop_id={shop_id}, user_id={user_id}, from_uid={from_uid}")
                 return False
 
-            # 尝试发送消息
             from Channel.pinduoduo.utils.API.send_message import SendMessage
-            sender = SendMessage(shop_id, user_id)
-            result = sender.send_text(from_uid, reply)
-            if isinstance(result, dict) and result.get("success"):
-                return True
-            return False
+            result = await asyncio.to_thread(
+                lambda: SendMessage(shop_id, user_id).send_text(from_uid, reply)
+            )
+            success = isinstance(result, dict) and result.get("success")
+            if not success:
+                self.logger.warning(f"[AI] 发送失败 from_uid={from_uid} result={result}")
+            return bool(success)
 
         except Exception as e:
             self.logger.error(f"发送回复失败: {e}")

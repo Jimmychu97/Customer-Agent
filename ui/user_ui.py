@@ -672,7 +672,7 @@ class UserManagerWidget(QFrame):
                         username=new_data["username"],
                         password=new_data["password"],
                         cookies=account_data.get("cookies"),
-                        proxy=new_data.get("proxy") or None,
+                        proxy=new_data.get("proxy"),
                     )
                 
                 # 如果状态变化，仅更新状态

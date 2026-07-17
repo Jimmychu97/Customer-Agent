@@ -14,7 +14,6 @@ except ImportError:
     raise ImportError("openai package is required: pip install openai>=1.109.1")
 
 from utils.logger_loguru import get_logger
-from utils.volcengine_models import ChatCompletionsRequest
 
 logger = get_logger("LLMClient")
 
@@ -88,37 +87,21 @@ class LLMClient:
         if not self._client:
             raise RuntimeError("LLM 客户端未初始化，请先调用 initialize()")
 
-        # 1. 构建请求参数字典
-        request_dict: Dict[str, Any] = {
+        # 构建请求参数
+        request_params: Dict[str, Any] = {
             "model": self.model_name,
             "messages": messages,
             "temperature": self.temperature,
         }
 
-        if self.tools:
-            request_dict["tools"] = self.tools
-            request_dict["tool_choice"] = tool_choice
+        if self.tools and tool_choice != "none":
+            request_params["tools"] = self.tools
+            request_params["tool_choice"] = tool_choice
 
-        # 2. 使用 Pydantic 模型验证请求参数
-        try:
-            validated_request = ChatCompletionsRequest(**request_dict)
-            logger.debug("请求参数验证通过")
-        except Exception as e:
-            logger.error(f"请求参数验证失败: {e}")
-            raise
-
-        # 3. 调试日志：输出发送给 LLM 的消息（限制内容长度，避免泄露敏感信息）
         logger.debug(f"发送给 LLM 的消息数: {len(messages)}")
-        for i, msg in enumerate(messages):
-            role = msg.get("role", "unknown")
-            # 只记录消息角色和长度，不记录内容（避免泄露用户隐私）
-            content = str(msg.get("content", ""))
-            logger.debug(f"消息 {i} [{role}]: 长度={len(content)}")
 
-        # 4. 调用 API
-        response = await self._client.chat.completions.create(
-            **validated_request.model_dump(exclude_none=True)
-        )
+        # 直接调用 API，不经过 Pydantic 验证
+        response = await self._client.chat.completions.create(**request_params)
         message = response.choices[0].message
 
         # 5. 记录 token 使用情况

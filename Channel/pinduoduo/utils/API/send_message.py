@@ -1,5 +1,11 @@
 from ..base_request import BaseRequest
 from typing import Dict, Any
+from collections import defaultdict
+from threading import Lock
+
+# 全局：记录每个 (shop_id, recipient_uid, content) 的发送次数
+_send_counter: Dict[tuple, int] = defaultdict(int)
+_send_counter_lock = Lock()
 
 
 class SendMessage(BaseRequest):
@@ -10,6 +16,14 @@ class SendMessage(BaseRequest):
         if not hasattr(self, 'account_name'):
             self.logger.error(f"无法在数据库中找到账户: shop_id={shop_id}, user_id={user_id}")
             raise ValueError("找不到指定的账户信息")
+
+    def _dedup_content(self, recipient_uid: str, content: str) -> str:
+        """每条消息都加序号，避免服务端去重"""
+        key = (self.shop_id, str(recipient_uid), content)
+        with _send_counter_lock:
+            _send_counter[key] += 1
+            count = _send_counter[key]
+        return f"{count}. {content}"
 
     def send_text(self, recipient_uid, message_content):
         """
@@ -28,7 +42,7 @@ class SendMessage(BaseRequest):
                     "from": {
                         "role": "mall_cs"
                     },
-                    "content": message_content,
+                    "content": self._dedup_content(recipient_uid, message_content),
                     "msg_id": None,
                     "type": 0,
                     "is_aut": 0,
@@ -43,7 +57,7 @@ class SendMessage(BaseRequest):
             if result.get("result", {}).get("error_code") == 10002:
                 error_msg = result.get('result', {}).get('error')
                 self.logger.error(f"发送文本消息失败: {error_msg}")
-                return error_msg
+                return {"success": False, "error_msg": error_msg}
             else:
                 return result
         else:

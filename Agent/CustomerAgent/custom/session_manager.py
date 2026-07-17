@@ -27,6 +27,14 @@ from utils.logger_loguru import get_logger
 
 logger = get_logger("SessionManager")
 
+
+def _is_json(s: str) -> bool:
+    try:
+        json.loads(s)
+        return True
+    except (json.JSONDecodeError, ValueError):
+        return False
+
 Base = declarative_base()
 
 
@@ -50,11 +58,19 @@ class AgentMessage(Base):
     )
 
     def to_dict(self) -> Dict[str, Any]:
+        content = self.content
+        if content and isinstance(content, str):
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, (list, dict)):
+                    content = parsed
+            except (json.JSONDecodeError, ValueError):
+                pass
         return {
             "id": self.id,
             "session_id": self.session_id,
             "role": self.role,
-            "content": self.content,
+            "content": content,
             "tool_call_id": self.tool_call_id,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
@@ -170,12 +186,14 @@ class SessionManager:
         self,
         session_id: str,
         role: str,
-        content: str,
+        content,
         tool_call_id: Optional[str] = None,
     ) -> bool:
         """追加消息到会话历史"""
         session = self._session()
         try:
+            if isinstance(content, (list, dict)):
+                content = json.dumps(content, ensure_ascii=False)
             msg = AgentMessage(
                 session_id=session_id,
                 role=role,
@@ -275,7 +293,7 @@ class SessionManager:
             summary_input = [
                 {
                     "role": msg.role,
-                    "content": msg.content,
+                    "content": msg.content if not isinstance(msg.content, str) or not msg.content.startswith('[') else json.loads(msg.content) if _is_json(msg.content) else msg.content,
                 }
                 for msg in old_messages
             ]

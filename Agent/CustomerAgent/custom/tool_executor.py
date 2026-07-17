@@ -23,10 +23,17 @@ class ToolResult:
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为 LLM 消息格式的字典"""
+        content = self.content
+        if not isinstance(content, str):
+            import json
+            try:
+                content = json.dumps(content, ensure_ascii=False)
+            except Exception:
+                content = str(content)
         return {
             "role": "tool",
             "tool_call_id": self.tool_call_id,
-            "content": self.content,
+            "content": content,
         }
 
 

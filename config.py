@@ -32,6 +32,7 @@ class LLMConfig(BaseModel):
 class BusinessHoursConfig(BaseModel):
     """AI回复开关配置"""
     enabled: bool = Field(default=True, description="是否启用AI自动回复")
+    image_reply_enabled: bool = Field(default=True, description="收到图片时是否自动回复引导文字")
 
 class PromptConfig(BaseModel):
     """提示词配置模型"""
@@ -103,7 +104,8 @@ class ConfigModel(BaseModel):
 # 默认配置基础数据
 config_base = {
     "business_hours": {
-        "enabled": True
+        "enabled": True,
+        "image_reply_enabled": True
     },
     "llm": {
         "model_name": "",

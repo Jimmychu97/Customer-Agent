@@ -187,6 +187,14 @@ class MessageBuilder:
             content = msg["content"]
             tool_call_id = msg.get("tool_call_id")
 
+            # 确保 content 是字符串或合法的多模态列表
+            if content is not None and not isinstance(content, (str, list)):
+                import json
+                try:
+                    content = json.dumps(content, ensure_ascii=False)
+                except Exception:
+                    content = str(content)
+
             if role == "tool":
                 messages.append({
                     "role": "tool",

@@ -223,16 +223,30 @@ class BusinessHoursCard(CardWidget):
         switch_row.addWidget(self.enabled_switch)
         layout.addLayout(switch_row)
 
-        desc = CaptionLabel("开启后 AI 将自动回复客户消息；关闭后所有消息不作任何处理。")
+        image_row = QHBoxLayout()
+        image_row.setContentsMargins(0, 0, 0, 0)
+        image_label = BodyLabel("图片消息自动回复")
+        self.image_reply_switch = SwitchButton()
+        self.image_reply_switch.setChecked(True)
+        image_row.addWidget(image_label)
+        image_row.addStretch()
+        image_row.addWidget(self.image_reply_switch)
+        layout.addLayout(image_row)
+
+        desc = CaptionLabel("开启后 AI 将自动回复客户消息；关闭后所有消息不作任何处理。\n图片识别开关：开启后收到图片时调用多模态 LLM 识别图片内容并回复；关闭后回复请发文字。")
         desc.setStyleSheet("color: #666;")
         layout.addWidget(desc)
 
     def getConfig(self) -> dict:
-        return {"business_hours": {"enabled": self.enabled_switch.isChecked()}}
+        return {"business_hours": {
+            "enabled": self.enabled_switch.isChecked(),
+            "image_reply_enabled": self.image_reply_switch.isChecked(),
+        }}
 
     def setConfig(self, config: dict):
         business_hours = config.get("business_hours", {})
         self.enabled_switch.setChecked(business_hours.get("enabled", True))
+        self.image_reply_switch.setChecked(business_hours.get("image_reply_enabled", True))
 
 
 class SettingUI(QFrame):

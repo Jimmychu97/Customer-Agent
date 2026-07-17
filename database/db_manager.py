@@ -300,7 +300,9 @@ class DatabaseManager:
                 'status': account.status
             }
 
-    def update_account_info(self, channel_name: str, shop_id: str, user_id: str, username: Optional[str] = None, password: Optional[str] = None, cookies: Optional[str] = None, proxy: Optional[str] = None, status: Optional[int] = None) -> bool:
+    _UNSET = object()
+
+    def update_account_info(self, channel_name: str, shop_id: str, user_id: str, username: Optional[str] = None, password: Optional[str] = None, cookies: Optional[str] = None, proxy: object = _UNSET, status: Optional[int] = None) -> bool:
         """更新账号信息"""
         with self.session_scope() as session:
             channel = self._get_channel(session, channel_name)
@@ -321,8 +323,8 @@ class DatabaseManager:
                 account.password = password
             if cookies is not None:
                 account.cookies = cookies
-            if proxy is not None:
-                account.proxy = proxy
+            if proxy is not DatabaseManager._UNSET:
+                account.proxy = proxy or None
             if status is not None:
                 account.status = status
             self.logger.info(f"成功更新账号信息: {username} (用户ID: {user_id})")

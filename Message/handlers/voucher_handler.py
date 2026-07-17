@@ -24,56 +24,82 @@ def _luhn_check(number: str) -> bool:
     return (odd_sum + even_sum) % 10 == 0
 
 
+def _normalize_number(text: str) -> str:
+    """将数字串中的空格、连字符、全角空格统一去除"""
+    return re.sub(r'[\s\-\u3000]+', '', text)
+
+
 def _extract_imei(text: str) -> Optional[str]:
-    """提取 IMEI
-    规则：15位纯数字 + Luhn 算法校验
-    支持带空格格式：35 227917 289634 6
-    """
-    # 先尝试连续15位
-    for m in re.finditer(r'(?<!\d)(\d{15})(?!\d)', text):
-        candidate = m.group(1)
-        if _luhn_check(candidate):
-            return candidate
-    # 再尝试带空格格式
-    for m in re.finditer(r'(\d[\d ]{13,20}\d)', text):
-        candidate = re.sub(r'\s+', '', m.group(1))
-        if len(candidate) == 15 and _luhn_check(candidate):
+    """提取 IMEI（15位数字 + Luhn校验，支持任意分隔符/空格格式）"""
+    # 匹配由数字和空格/连字符组成、去空格后为15位的片段
+    for m in re.finditer(r'(?<![\w])([\d][\d\s\-]{13,22}[\d])(?![\w])', text):
+        candidate = _normalize_number(m.group(1))
+        if len(candidate) == 15 and candidate.isdigit() and _luhn_check(candidate):
             return candidate
     return None
 
 
 def _extract_serial(text: str) -> Optional[str]:
-    """提取苹果序列号
-    苹果序列号规则：
-    - 新款（2021年后随机序列号）：固定 12 位
-    - 旧款：固定 10 位
-    - 字符集：A-Z + 0-9，排除 I、O（苹果官方不使用）
-    - 必须同时含字母和数字（排除纯数字、纯字母）
+    """提取苹果序列号（10或12位字母数字，支持带空格格式）
+    - 字符集：A-Z + 0-9，排除 I、O
+    - 必须同时含字母和数字
     - 用户输入的 o/O 自动替换为 0
     """
-    APPLE_CHARS = r'[A-HJ-NP-Z0-9]'  # 排除 I、O
-    normalized = text.replace('o', '0').replace('O', '0').upper()
-    # 苹果序列号固定 10 位或 12 位
+    APPLE_CHARS = r'[A-HJ-NP-Z0-9]'
+    # 先去掉空格后在 normalized 文本上匹配
+    normalized = re.sub(r'\s+', '', text).replace('o', '0').replace('O', '0').upper()
     for length in (12, 10):
         for m in re.finditer(
             rf'(?<![A-Z0-9])({APPLE_CHARS}{{{length}}})(?![A-Z0-9])', normalized
         ):
             val = m.group(1)
-            if re.search(r'[A-Z]', val):
+            if re.search(r'[A-Z]', val) and re.search(r'[0-9]', val):
                 return val
     return None
 
 
-def _extract_coupon(text: str) -> Optional[str]:
-    """提取拼多多卡券号（10-14位纯数字，支持带空格格式，排除15位IMEI）"""
-    # 先尝试连续数字（10-14位）
-    for m in re.finditer(r'(?<!\d)(\d{10,14})(?!\d)', text):
-        return m.group(1)
-    # 再尝试带空格格式，合并后10-14位
-    for m in re.finditer(r'(\d[\d ]{8,18}\d)', text):
-        candidate = re.sub(r'\s+', '', m.group(1))
-        if 10 <= len(candidate) <= 14:
+def _is_phone(candidate: str) -> bool:
+    """判断是否为手机号"""
+    if len(candidate) == 11 and re.match(r'^1[3-9]', candidate):
+        return True
+    if len(candidate) == 13 and re.match(r'^861[3-9]', candidate):
+        return True
+    return False
+
+
+def _extract_coupon(text: str, exclude_imei: str = None) -> Optional[str]:
+    """提取拼多多卡券号（10-14位纯数字，支持空格/连字符分组格式，排除手机号）
+
+    优先匹配带分隔符的分组格式（更可信），再匹配纯连续数字。
+    对于超长连续数字串，尝试从右截取标准长度（12位优先）。
+    exclude_imei: 已提取的IMEI，避免将其子串误识别为卡券号
+    """
+    # 第一轮：必须含空格或连字符分隔的分组格式（高可信度），不跨行
+    for m in re.finditer(r'(?<!\d)(\d+(?:[ \t\-]+\d+)+)(?!\d)', text):
+        candidate = _normalize_number(m.group(1))
+        if candidate.isdigit() and 10 <= len(candidate) <= 14 and not _is_phone(candidate):
+            if exclude_imei and (candidate in exclude_imei or exclude_imei in candidate):
+                continue
             return candidate
+
+    # 第二轮：纯连续数字，精确匹配 10-14 位
+    for m in re.finditer(r'(?<!\d)(\d{10,14})(?!\d)', text):
+        candidate = m.group(1)
+        if not _is_phone(candidate):
+            if exclude_imei and (candidate in exclude_imei or exclude_imei in candidate):
+                continue
+            return candidate
+
+    # 第三轮：连续数字串超出范围（如15-16位），尝试从右截取12位
+    for m in re.finditer(r'(?<!\d)(\d{15,18})(?!\d)', text):
+        raw = m.group(1)
+        for length in (12, 10):
+            candidate = raw[-length:]
+            if not _is_phone(candidate):
+                if exclude_imei and (candidate in exclude_imei or exclude_imei in candidate):
+                    continue
+                return candidate
+
     return None
 
 
@@ -183,7 +209,7 @@ class VoucherDetectionHandler(BaseHandler):
     async def handle(self, context: Context, metadata: Dict[str, Any]) -> bool:
         content = context.content or ""
         sn = _extract_imei(content) or _extract_serial(content)
-        coupon_no = _extract_coupon(content)
+        coupon_no = _extract_coupon(content, exclude_imei=sn)
 
         from_uid = metadata.get("from_uid")
         shop_id = metadata.get("shop_id")
@@ -200,17 +226,24 @@ class VoucherDetectionHandler(BaseHandler):
             f"from_uid={from_uid} shop_id={shop_id}"
         )
 
+        session_id = f"pinduoduo{from_uid}"
+        self._record_message(session_id, "user", content)
+
         # 只有卡券，没有序列号/IMEI → 存单后检查是否已凑齐
         if coupon_no and not sn:
             final_sn, final_coupon, order_id = await self._upsert_order(sn, coupon_no, shop_id, from_uid)
             if final_sn and final_coupon:
-                # 凑齐了，触发核销
+                notify = f"✅ 已记录您的卡券号：{coupon_no}，正在核销..."
+                await self._send(shop_id, user_id, from_uid, notify)
+                self._record_message(session_id, "assistant", notify)
                 reply, _ = await self._do_verify(final_sn, final_coupon, shop_id, user_id, from_uid, order_id)
                 if reply:
                     await self._send(shop_id, user_id, from_uid, reply)
+                    self._record_message(session_id, "assistant", reply)
             else:
-                await self._send(shop_id, user_id, from_uid,
+                guide = (
                     f"✅ 已记录您的卡券号：{coupon_no}\n"
+                    f"如有误请直接发文字纠正\n"
                     f"\n"
                     f"请继续提供以下任意一项完成核销：\n"
                     f"\n"
@@ -220,23 +253,31 @@ class VoucherDetectionHandler(BaseHandler):
                     f"🔢 序列号\n"
                     f"设置 → 通用 → 关于本机 → 序列号"
                 )
+                await self._send(shop_id, user_id, from_uid, guide)
+                self._record_message(session_id, "assistant", guide)
             return True
 
         # 只有序列号/IMEI，没有卡券 → 存单后检查是否已凑齐
         if sn and not coupon_no:
             final_sn, final_coupon, order_id = await self._upsert_order(sn, coupon_no, shop_id, from_uid)
             if final_sn and final_coupon:
-                # 凑齐了，触发核销
+                notify = f"✅ 已记录您的序列号/IMEI：{sn}，正在核销..."
+                await self._send(shop_id, user_id, from_uid, notify)
+                self._record_message(session_id, "assistant", notify)
                 reply, _ = await self._do_verify(final_sn, final_coupon, shop_id, user_id, from_uid, order_id)
                 if reply:
                     await self._send(shop_id, user_id, from_uid, reply)
+                    self._record_message(session_id, "assistant", reply)
             else:
-                await self._send(shop_id, user_id, from_uid,
+                guide = (
                     f"✅ 已记录您的序列号/IMEI：{sn}\n"
+                    f"如有误请直接发文字纠正\n"
                     f"\n"
                     f"请提供卡券号完成核销：\n"
                     f"待收货 → 点击商品 → 查看卡券 → 复制卡券发给客服"
                 )
+                await self._send(shop_id, user_id, from_uid, guide)
+                self._record_message(session_id, "assistant", guide)
             return True
 
         # 同一条消息里两个都有 → 直接核销
@@ -244,6 +285,7 @@ class VoucherDetectionHandler(BaseHandler):
         reply, _ = await self._do_verify(sn, coupon_no, shop_id, user_id, from_uid, order_id)
         if reply:
             await self._send(shop_id, user_id, from_uid, reply)
+            self._record_message(session_id, "assistant", reply)
         return True
 
     async def _upsert_order(
@@ -307,7 +349,6 @@ class VoucherDetectionHandler(BaseHandler):
     ) -> Tuple[Optional[str], str]:
         """触发核销流程，核销成功后串行 await GSX查询+LLM分析"""
         self.logger.info(f"[核销] 双条件齐备，触发核销 order_id={order_id}")
-        await self._send(shop_id, user_id, from_uid, "好的，正在查询~")
         result_text, gsx_params = await asyncio.to_thread(
             self._query_and_verify,
             sn, coupon_no, shop_id, user_id, from_uid, order_id
@@ -441,6 +482,20 @@ class VoucherDetectionHandler(BaseHandler):
                     order.sn_imei = ""
         except Exception as e:
             self.logger.error(f"[核销] 清空 sn_imei 失败 order_id={order_id}: {e}")
+
+    def _clear_order_coupon(self, order_id: Optional[int]) -> None:
+        """清空 Order 的 coupons，让用户可以重新提供卡券号"""
+        if not order_id:
+            return
+        try:
+            from database import db_manager
+            from database.models import Order
+            with db_manager.session_scope() as session:
+                order = session.query(Order).filter_by(id=order_id).first()
+                if order:
+                    order.coupons = ""
+        except Exception as e:
+            self.logger.error(f"[核销] 清空 coupons 失败 order_id={order_id}: {e}")
 
     async def _query_lingsu_and_send(
         self, serial: str, goods_id: str, spec: str, report_text: Optional[str],
@@ -676,10 +731,28 @@ class VoucherDetectionHandler(BaseHandler):
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] 更新 Order 状态失败 order_id={order_id}: {e}")
 
+    def _record_message(self, session_id: str, role: str, content: str) -> None:
+        """将消息写入 agent_messages 会话历史"""
+        try:
+            from Agent.CustomerAgent.custom.agent_config import AgentConfig
+            from Agent.CustomerAgent.custom.session_manager import SessionManager
+            agent_config = AgentConfig.load_from_config()
+            SessionManager(
+                db_path=agent_config.db_path,
+                token_window=agent_config.token_window,
+                compress_ratio=agent_config.compress_ratio,
+                retain_count=agent_config.retain_count,
+                model_name=agent_config.model_name,
+            ).add_message(session_id=session_id, role=role, content=content)
+        except Exception as e:
+            self.logger.warning(f"[核销] 写入会话历史失败: {e}")
+
     async def _send(self, shop_id: str, user_id: str, from_uid: str, text: str) -> bool:
         try:
             from Channel.pinduoduo.utils.API.send_message import SendMessage
-            result = SendMessage(shop_id, user_id).send_text(from_uid, text)
+            result = await asyncio.to_thread(
+                lambda: SendMessage(shop_id, user_id).send_text(from_uid, text)
+            )
             success = isinstance(result, dict) and result.get("success", False)
             if success:
                 self.logger.info(f"[核销] 发送成功 from_uid={from_uid} text={text[:30]!r}")

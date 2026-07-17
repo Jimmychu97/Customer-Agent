@@ -285,6 +285,51 @@ class CustomerAgent(Bot):
         # 兜底
         return messages[-1].get("content", "")
 
+    async def recognize_image(self, image_url: str, context: Context = None) -> Optional[str]:
+        """
+        专用图片识别接口：不走 Agent 工具循环，不写会话历史
+
+        Args:
+            image_url: 图片 URL
+            context: 上下文（用于获取 shop_id 等信息）
+
+        Returns:
+            LLM 识别出的文字内容，失败返回 None
+        """
+        if not self._is_initialized:
+            if not await self.initialize_async():
+                return None
+
+        try:
+            shop_id = ""
+            if context and context.kwargs:
+                shop_id = getattr(context.kwargs, "shop_id", "") or ""
+
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是一个图片内容识别助手。请识别图片中的所有文字和关键信息，"
+                        "重点提取：IMEI码、序列号、卡券号、订单号等数字编码。"
+                        "直接输出识别到的内容，不要添加额外解释。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": "请识别图片中的所有文字内容，特别是数字编码。"},
+                    ],
+                },
+            ]
+
+            response = await self._llm_client.chat(messages, tool_choice="none")
+            return (response.content or "").strip() or None
+
+        except Exception as e:
+            logger.warning(f"[图片识别] LLM 调用失败: {e}")
+            return None
+
     async def _compress_with_llm(
         self,
         session_id: str,
