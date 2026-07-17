@@ -58,6 +58,12 @@ class ZhenxinApiConfig(BaseModel):
     apikey: str = Field(default="", description="API 密钥")
 
 
+class LingsuApiConfig(BaseModel):
+    """灵速验机查询接口配置"""
+    api_base: str = Field(default="", description="API 地址")
+    username: str = Field(default="", description="用户名")
+    apikey: str = Field(default="", description="API 密钥")
+
 
 class ConfigModel(BaseModel):
     """配置模型"""
@@ -86,6 +92,10 @@ class ConfigModel(BaseModel):
         default_factory=ZhenxinApiConfig,
         description="真心验机查询配置"
     )
+    lingsu_api: LingsuApiConfig = Field(
+        default_factory=LingsuApiConfig,
+        description="灵速验机查询配置"
+    )
     db_path: str = Field(default="", description="数据库路径")
 
 
@@ -112,6 +122,11 @@ config_base = {
         "style": "11"
     },
     "zhenxin_api": {
+        "apikey": ""
+    },
+    "lingsu_api": {
+        "api_base": "",
+        "username": "",
         "apikey": ""
     },
     "prompt": {

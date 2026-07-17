@@ -316,7 +316,7 @@ class VoucherDetectionHandler(BaseHandler):
         if status == _VOUCHER_SUCCESS and gsx_params:
             goods_id, spec, report_data, device_type = gsx_params
             if device_type == "apple":
-                await self._query_zhenxin_and_send(sn, goods_id, spec, report_data, order_id, shop_id, user_id, from_uid, result_text)
+                await self._query_lingsu_and_send(sn, goods_id, spec, report_data, order_id, shop_id, user_id, from_uid, result_text)
             else:
                 await self._query_gsx_and_send(sn, goods_id, spec, report_data, order_id, shop_id, user_id, from_uid, result_text)
             return None, status  # 核销成功时消息已在 _query_gsx_and_send 里全部发送
@@ -361,11 +361,11 @@ class VoucherDetectionHandler(BaseHandler):
         report_data = None
 
         if device_type == "apple" and zhenxin_sid:
-            from Channel.pinduoduo.utils.API.zhenxin_gsx_api import query_zhenxin
-            zx_result = query_zhenxin(serial, zhenxin_sid)
+            from Channel.pinduoduo.utils.API.lingsu_gsx_api import query_lingsu
+            zx_result = query_lingsu(serial, zhenxin_sid)
             if not zx_result["success"]:
                 self.logger.warning(
-                    f"[核销] 真心查询失败，序列号可能有误 sn={serial}: {zx_result.get('error_msg')}"
+                    f"[核销] 凌速查询失败，序列号可能有误 sn={serial}: {zx_result.get('error_msg')}"
                 )
                 self._clear_order_sn(order_id)
                 return (
@@ -442,12 +442,12 @@ class VoucherDetectionHandler(BaseHandler):
         except Exception as e:
             self.logger.error(f"[核销] 清空 sn_imei 失败 order_id={order_id}: {e}")
 
-    async def _query_zhenxin_and_send(
+    async def _query_lingsu_and_send(
         self, serial: str, goods_id: str, spec: str, report_text: Optional[str],
         order_id: int, shop_id: str, user_id: str, from_uid: str,
         voucher_success_text: str = ""
     ) -> None:
-        """苹果真心验机报告发送流程
+        """苹果凌速验机报告发送流程
         发送顺序：验机报告 → AI分析 → 核销成功 → 五星好评
         """
         try:
@@ -455,7 +455,7 @@ class VoucherDetectionHandler(BaseHandler):
             from database.models import Order
 
             if not report_text:
-                self.logger.warning(f"[核销] 无真心验机数据，跳过报告发送 sn={serial}")
+                self.logger.warning(f"[核销] 无凌速验机数据，跳过报告发送 sn={serial}")
                 if voucher_success_text:
                     await self._send(shop_id, user_id, from_uid, voucher_success_text)
                 return
@@ -474,7 +474,7 @@ class VoucherDetectionHandler(BaseHandler):
             await self._send(shop_id, user_id, from_uid, report_text)
 
             # 2. LLM 分析
-            analysis = await self._llm_analyze_zhenxin(report_text, session_id)
+            analysis = await self._llm_analyze_lingsu(report_text, session_id)
             if analysis:
                 await self._send(shop_id, user_id, from_uid, analysis)
 
@@ -486,10 +486,10 @@ class VoucherDetectionHandler(BaseHandler):
             await self._send(shop_id, user_id, from_uid, fixed)
 
         except Exception as e:
-            self.logger.opt(exception=True).error(f"[核销] 真心报告发送失败: {e}")
+            self.logger.opt(exception=True).error(f"[核销] 凌速报告发送失败: {e}")
 
-    async def _llm_analyze_zhenxin(self, report_text: str, session_id: str) -> str:
-        """苹果真心验机报告 LLM 分析"""
+    async def _llm_analyze_lingsu(self, report_text: str, session_id: str) -> str:
+        """苹果凌速验机报告 LLM 分析"""
         try:
             from Agent.CustomerAgent.custom.llm_client import LLMClient
             from Agent.CustomerAgent.custom.agent_config import AgentConfig
@@ -497,7 +497,7 @@ class VoucherDetectionHandler(BaseHandler):
 
             agent_config = AgentConfig.load_from_config()
             if not agent_config.validate():
-                self.logger.warning("[核销] LLM 配置无效，跳过真心分析")
+                self.logger.warning("[核销] LLM 配置无效，跳过凌速分析")
                 return ""
 
             llm_client = LLMClient(
@@ -529,9 +529,9 @@ class VoucherDetectionHandler(BaseHandler):
             )
             analysis = (response.content or "").strip()
 
-            session_content = f"[已完成真心验机查询]\n验机报告：\n{report_text}"
+            session_content = f"[已完成凌速验机查询]\n验机报告：\n{report_text}"
             if analysis:
-                self.logger.info(f"[核销] 真心分析完成，长度={len(analysis)}")
+                self.logger.info(f"[核销] 凌速分析完成，长度={len(analysis)}")
                 session_content += f"\n\n分析：\n{analysis}"
 
             session_manager = SessionManager(
@@ -549,7 +549,7 @@ class VoucherDetectionHandler(BaseHandler):
             return analysis
 
         except Exception as e:
-            self.logger.opt(exception=True).warning(f"[核销] LLM 分析真心报告失败: {e}")
+            self.logger.opt(exception=True).warning(f"[核销] LLM 分析凌速报告失败: {e}")
             return ""
 
     async def _query_gsx_and_send(
