@@ -95,7 +95,8 @@ class CustomerAgent(Bot):
         )
 
         # 子组件（延迟初始化）
-        self._llm_client: Optional[LLMClient] = None
+        self._llm_client: Optional[LLMClient] = None  # 文本对话客户端
+        self._vision_client: Optional[LLMClient] = None  # 图片识别客户端
         self._message_builder: Optional[MessageBuilder] = None
         self._tool_executor: Optional[ToolExecutor] = None
         self._session_manager: Optional[SessionManager] = None
@@ -116,7 +117,7 @@ class CustomerAgent(Bot):
             if not self._config.validate():
                 return False
 
-            # 3. 初始化 LLM 客户端
+            # 3. 初始化文本对话 LLM 客户端
             self._llm_client = LLMClient(
                 api_key=self._config.api_key,
                 api_base=self._config.api_base,
@@ -125,7 +126,20 @@ class CustomerAgent(Bot):
             )
             await self._llm_client.initialize()
 
-            # 4. 初始化会话管理器
+            # 4. 初始化图片识别 LLM 客户端（如果配置了）
+            if self._config.vision_api_key and self._config.vision_model_name:
+                self._vision_client = LLMClient(
+                    api_key=self._config.vision_api_key,
+                    api_base=self._config.vision_api_base,
+                    model_name=self._config.vision_model_name,
+                    temperature=0.1,  # 图片识别使用较低温度
+                )
+                await self._vision_client.initialize()
+                logger.info(f"视觉LLM客户端初始化成功: model={self._config.vision_model_name}")
+            else:
+                self._vision_client = None
+
+            # 5. 初始化会话管理器
             self._session_manager = SessionManager(
                 db_path=self._config.db_path,
                 token_window=self._config.token_window,
@@ -134,22 +148,22 @@ class CustomerAgent(Bot):
                 model_name=self._config.model_name,
             )
 
-            # 5. 初始化消息构建器
+            # 6. 初始化消息构建器
             self._message_builder = MessageBuilder(
                 instructions=self._config.instructions,
             )
 
-            # 6. 初始化工具执行器
+            # 7. 初始化工具执行器
             self._tool_executor = ToolExecutor()
 
-            # 7. 加载工具列表
+            # 8. 加载工具列表
             self._tools = get_tools_for_llm()
             self._llm_client.tools = self._tools
             tool_names = [t.get("function", {}).get("name", "unknown") for t in self._tools]
             logger.info(f"已加载 {len(self._tools)} 个工具: {tool_names}")
 
             self._is_initialized = True
-            logger.info(f"CustomerAgent 初始化成功: model={self._config.model_name}")
+            logger.info(f"CustomerAgent 初始化成功")
             return True
 
         except Exception as e:
@@ -157,13 +171,34 @@ class CustomerAgent(Bot):
             return False
 
     async def async_reply(self, query: str, context: Context = None) -> Reply:
-        """异步回复接口"""
+        """
+        异步回复接口
+
+        自动判断消息类型：
+        - 图片消息 -> 使用视觉LLM（如已配置）
+        - 文本消息 -> 使用文本LLM
+        """
         # 延迟初始化
         if not self._is_initialized:
             if not await self.initialize_async():
                 return Reply(ReplyType.TEXT, "AI客服初始化失败，请检查配置。")
 
         try:
+            # 检测是否为图片消息
+            is_image, image_url = self._detect_image_message(query)
+
+            # 如果是图片消息且有视觉模型，使用视觉LLM
+            if is_image and image_url and self._vision_client:
+                logger.info(f"[对话] 检测到图片消息，使用视觉LLM ({self._vision_client.model_name})")
+                recognized_text = await self.recognize_image(image_url, context)
+                if recognized_text:
+                    # 将识别结果作为用户消息继续处理
+                    query = f"[图片识别结果]\n{recognized_text}"
+                else:
+                    return Reply(ReplyType.TEXT, "抱歉，图片识别失败，请稍后再试。")
+            else:
+                logger.info(f"[对话] 文本对话，使用文本LLM ({self._llm_client.model_name})")
+
             # 构建 session_id 和 dependencies
             from_uid = getattr(context.kwargs, "from_uid", None) if context else None
             if context and context.channel_type and from_uid:
@@ -191,7 +226,7 @@ class CustomerAgent(Bot):
             # 构建 messages
             messages = self._message_builder.build_messages(query, history, dependencies)
 
-            # 执行 Agent 循环
+            # 执行 Agent 循环（使用文本LLM）
             final_content = await self._run_agent_loop(messages, dependencies)
 
             # 保存最终回复到历史
@@ -206,6 +241,37 @@ class CustomerAgent(Bot):
         except Exception as e:
             logger.error(f"CustomerAgent 回复失败: {e}")
             return Reply(ReplyType.TEXT, "抱歉，我现在无法回复，请稍后再试。")
+
+    def _detect_image_message(self, query: str) -> tuple[bool, Optional[str]]:
+        """
+        检测消息是否包含图片
+
+        Args:
+            query: 用户消息内容
+
+        Returns:
+            (是否为图片消息, 图片URL)
+        """
+        if not query:
+            return False, None
+
+        try:
+            import json
+            # 尝试解析 JSON 格式
+            data = json.loads(query) if isinstance(query, str) else query
+            if isinstance(data, dict):
+                url = data.get("url") or data.get("thumb_url") or data.get("image_url")
+                if url and isinstance(url, str):
+                    return True, url
+            # 检查是否直接是 URL
+            if isinstance(query, str) and query.startswith("http") and any(
+                ext in query.lower() for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]
+            ):
+                return True, query
+        except Exception:
+            pass
+
+        return False, None
 
     async def _run_agent_loop(
         self,
@@ -301,9 +367,10 @@ class CustomerAgent(Bot):
                 return None
 
         try:
-            shop_id = ""
-            if context and context.kwargs:
-                shop_id = getattr(context.kwargs, "shop_id", "") or ""
+            # 优先使用视觉模型，未配置则使用文本模型
+            client = self._vision_client or self._llm_client
+            model_type = "视觉LLM" if self._vision_client else "文本LLM"
+            logger.info(f"[图片识别] 使用 {model_type} ({client.model_name})")
 
             messages = [
                 {
@@ -323,11 +390,13 @@ class CustomerAgent(Bot):
                 },
             ]
 
-            response = await self._llm_client.chat(messages, tool_choice="none")
-            return (response.content or "").strip() or None
+            response = await client.chat(messages, tool_choice="none")
+            content = (response.content or "").strip() or None
+            logger.info(f"[图片识别] 识别成功，内容长度: {len(content) if content else 0}")
+            return content
 
         except Exception as e:
-            logger.warning(f"[图片识别] LLM 调用失败: {e}")
+            logger.error(f"[图片识别] LLM 调用失败: {e}")
             return None
 
     async def _compress_with_llm(

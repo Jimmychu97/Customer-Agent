@@ -35,10 +35,15 @@ class AgentConfig:
     max_loops: int = DEFAULT_MAX_LOOPS
     temperature: float = DEFAULT_TEMPERATURE
 
-    # LLM 配置
+    # LLM 配置（文本对话）
     model_name: str = field(default_factory=lambda: get_config("llm.model_name", "gpt-3.5-turbo"))
     api_key: str = field(default_factory=lambda: get_config("llm.api_key", ""))
     api_base: str = field(default_factory=lambda: get_config("llm.api_base", ""))
+
+    # 视觉LLM 配置（图片识别）
+    vision_model_name: str = field(default_factory=lambda: get_config("vision_llm.model_name", ""))
+    vision_api_key: str = field(default_factory=lambda: get_config("vision_llm.api_key", ""))
+    vision_api_base: str = field(default_factory=lambda: get_config("vision_llm.api_base", ""))
 
     # Prompt 配置（仅 instructions 可配置，description 和 additional_context 由代码硬编码）
     instructions: List[str] = field(default_factory=lambda: get_config("prompt.instructions", []))

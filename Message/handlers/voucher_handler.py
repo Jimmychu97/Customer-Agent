@@ -546,22 +546,18 @@ class VoucherDetectionHandler(BaseHandler):
     async def _llm_analyze_lingsu(self, report_text: str, session_id: str) -> str:
         """苹果凌速验机报告 LLM 分析"""
         try:
-            from Agent.CustomerAgent.custom.llm_client import LLMClient
-            from Agent.CustomerAgent.custom.agent_config import AgentConfig
-            from Agent.CustomerAgent.custom.session_manager import SessionManager
-
-            agent_config = AgentConfig.load_from_config()
-            if not agent_config.validate():
-                self.logger.warning("[核销] LLM 配置无效，跳过凌速分析")
-                return ""
-
-            llm_client = LLMClient(
-                api_key=agent_config.api_key,
-                api_base=agent_config.api_base,
-                model_name=agent_config.model_name,
-                temperature=agent_config.temperature,
-            )
-            await llm_client.initialize()
+            # 复用 CustomerAgent 的 LLM 客户端
+            from core.di_container import container
+            from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
+            
+            agent = container.get(CustomerAgent)
+            if not agent._is_initialized:
+                await agent.initialize_async()
+            
+            # 优先使用视觉LLM分析图片类报告，否则用文本LLM
+            llm_client = agent._vision_client or agent._llm_client
+            model_type = "视觉LLM" if agent._vision_client else "文本LLM"
+            self.logger.info(f"[凌速分析] 使用 {model_type} ({llm_client.model_name})")
 
             prompt = (
                 "你是一名专业的苹果验机顾问。根据以下验机报告，"
@@ -589,14 +585,8 @@ class VoucherDetectionHandler(BaseHandler):
                 self.logger.info(f"[核销] 凌速分析完成，长度={len(analysis)}")
                 session_content += f"\n\n分析：\n{analysis}"
 
-            session_manager = SessionManager(
-                db_path=agent_config.db_path,
-                token_window=agent_config.token_window,
-                compress_ratio=agent_config.compress_ratio,
-                retain_count=agent_config.retain_count,
-                model_name=agent_config.model_name,
-            )
-            session_manager.add_message(
+            # 使用 Agent 的 session_manager
+            agent._session_manager.add_message(
                 session_id=session_id,
                 role="assistant",
                 content=session_content,
@@ -655,24 +645,20 @@ class VoucherDetectionHandler(BaseHandler):
             self.logger.opt(exception=True).error(f"[核销] GSX查询失败: {e}")
 
     async def _llm_analyze_gsx(self, gsx_text: str, session_id: str) -> str:
-        """用独立 LLMClient 分析 GSX 报告，并将结果写入会话历史"""
+        """用 LLM 分析 GSX 报告，并将结果写入会话历史"""
         try:
-            from Agent.CustomerAgent.custom.llm_client import LLMClient
-            from Agent.CustomerAgent.custom.agent_config import AgentConfig
-            from Agent.CustomerAgent.custom.session_manager import SessionManager
-
-            agent_config = AgentConfig.load_from_config()
-            if not agent_config.validate():
-                self.logger.warning("[核销] LLM 配置无效，跳过GSX分析")
-                return ""
-
-            llm_client = LLMClient(
-                api_key=agent_config.api_key,
-                api_base=agent_config.api_base,
-                model_name=agent_config.model_name,
-                temperature=agent_config.temperature,
-            )
-            await llm_client.initialize()
+            # 复用 CustomerAgent 的 LLM 客户端
+            from core.di_container import container
+            from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
+            
+            agent = container.get(CustomerAgent)
+            if not agent._is_initialized:
+                await agent.initialize_async()
+            
+            # 优先使用视觉LLM分析图片类报告，否则用文本LLM
+            llm_client = agent._vision_client or agent._llm_client
+            model_type = "视觉LLM" if agent._vision_client else "文本LLM"
+            self.logger.info(f"[GSX分析] 使用 {model_type} ({llm_client.model_name})")
 
             prompt = (
                 "你是一名专业的苹果验机顾问。根据以下 GSX 验机报告，"
@@ -686,7 +672,7 @@ class VoucherDetectionHandler(BaseHandler):
                 "⚠️ 风险：1-2条简短说明（有维修记录时必须列出）\n"
                 "🏆 建议：1-2句购买建议\n"
                 "总字数控制在200字以内，如有疑问可继续询问。\n\n"
-                f"验机报告：\n{gsx_text}"
+                f"验机���告：\n{gsx_text}"
             )
 
             response = await llm_client.chat(
@@ -701,14 +687,8 @@ class VoucherDetectionHandler(BaseHandler):
                 self.logger.info(f"[核销] GSX分析完成，长度={len(analysis)}")
                 session_content += f"\n\n分析：\n{analysis}"
 
-            session_manager = SessionManager(
-                db_path=agent_config.db_path,
-                token_window=agent_config.token_window,
-                compress_ratio=agent_config.compress_ratio,
-                retain_count=agent_config.retain_count,
-                model_name=agent_config.model_name,
-            )
-            session_manager.add_message(
+            # 使用 Agent 的 session_manager
+            agent._session_manager.add_message(
                 session_id=session_id,
                 role="assistant",
                 content=session_content,

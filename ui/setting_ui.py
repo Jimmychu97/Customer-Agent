@@ -18,7 +18,7 @@ from config import config, config_base
 
 
 class LLMConfigCard(CardWidget):
-    """LLM配置卡片"""
+    """LLM配置卡片（文本对话）"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -31,7 +31,7 @@ class LLMConfigCard(CardWidget):
         layout.setSpacing(16)
 
         # 卡片标题
-        title_label = StrongBodyLabel("LLM模型配置")
+        title_label = StrongBodyLabel("文本对话AI配置")
         title_label.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
         layout.addWidget(title_label)
 
@@ -62,7 +62,7 @@ class LLMConfigCard(CardWidget):
 
         # 说明文本
         description_label = CaptionLabel(
-            "配置LLM模型的连接参数。\n"
+            "配置文本对话AI模型。\n"
             "支持OpenAI兼容的API接口，包括豆包、通义千问等模型。"
         )
         description_label.setStyleSheet("color: #666; padding: 8px 0;")
@@ -79,6 +79,72 @@ class LLMConfigCard(CardWidget):
     def setConfig(self, config: dict):
         """设置配置"""
         self.api_base_edit.setText(config.get("api_base", "https://ark.cn-beijing.volces.com/api/v3"))
+        self.api_key_edit.setText(config.get("api_key", ""))
+        self.model_name_edit.setText(config.get("model_name", ""))
+
+
+class VisionLLMConfigCard(CardWidget):
+    """视觉LLM配置卡片（图片识别）"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setupUI()
+
+    def setupUI(self):
+        """设置UI"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(16)
+
+        # 卡片标题
+        title_label = StrongBodyLabel("图片识别AI配置")
+        title_label.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
+        layout.addWidget(title_label)
+
+        # 表单布局
+        form_layout = QFormLayout()
+        form_layout.setSpacing(12)
+        form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        form_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form_layout.setFormAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        # API Base URL
+        self.api_base_edit = LineEdit()
+        self.api_base_edit.setPlaceholderText("https://ark.cn-beijing.volces.com/api/v3")
+        form_layout.addRow("API Base URL:", self.api_base_edit)
+
+        # API Key
+        self.api_key_edit = PasswordLineEdit()
+        self.api_key_edit.setPlaceholderText("输入您的 API Key（可留空，留空则使用文本AI）")
+        form_layout.addRow("API Key:", self.api_key_edit)
+
+        # Model Name
+        self.model_name_edit = LineEdit()
+        self.model_name_edit.setPlaceholderText("支持视觉的多模态模型，如：gpt-4o、qwen-vl-plus")
+        form_layout.addRow("模型名称:", self.model_name_edit)
+
+        layout.addLayout(form_layout)
+
+        # 说明文本
+        description_label = CaptionLabel(
+            "配置图片识别AI模型（多模态模型）。\n"
+            "如果不配置，将使用文本对话AI进行图片识别（可能不支持）。\n"
+            "推荐使用支持视觉能力的模型：GPT-4O、Qwen-VL、Claude-3等。"
+        )
+        description_label.setStyleSheet("color: #666; padding: 8px 0;")
+        layout.addWidget(description_label)
+
+    def getConfig(self) -> dict:
+        """获取配置"""
+        return {
+            "api_base": self.api_base_edit.text().strip(),
+            "api_key": self.api_key_edit.text().strip(),
+            "model_name": self.model_name_edit.text().strip()
+        }
+
+    def setConfig(self, config: dict):
+        """设置配置"""
+        self.api_base_edit.setText(config.get("api_base", ""))
         self.api_key_edit.setText(config.get("api_key", ""))
         self.model_name_edit.setText(config.get("model_name", ""))
 
@@ -139,62 +205,6 @@ class PromptConfigCard(CardWidget):
             self.instructions_edit.setPlainText("\n".join(instructions))
         elif isinstance(instructions, str):
             self.instructions_edit.setPlainText(instructions)
-
-
-class PddOpenConfigCard(CardWidget):
-    """拼多多开放平台配置卡片"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setupUI()
-
-    def setupUI(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(16)
-
-        title_label = StrongBodyLabel("拼多多开放平台配置")
-        title_label.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
-        layout.addWidget(title_label)
-
-        form_layout = QFormLayout()
-        form_layout.setSpacing(12)
-        form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        form_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-
-        self.client_id_edit = LineEdit()
-        self.client_id_edit.setPlaceholderText("输入应用 client_id")
-        form_layout.addRow("Client ID:", self.client_id_edit)
-
-        self.client_secret_edit = PasswordLineEdit()
-        self.client_secret_edit.setPlaceholderText("输入应用 client_secret")
-        form_layout.addRow("Client Secret:", self.client_secret_edit)
-
-        self.access_token_edit = PasswordLineEdit()
-        self.access_token_edit.setPlaceholderText("输入商家授权 access_token")
-        form_layout.addRow("Access Token:", self.access_token_edit)
-
-        layout.addLayout(form_layout)
-
-        desc = CaptionLabel(
-            "拼多多开放平台凭证，用于官方卡券核销 API。\n"
-            "在拼多多开放平台创建应用后获取 client_id 和 client_secret，\n"
-            "access_token 通过商家授权流程获取。"
-        )
-        desc.setStyleSheet("color: #666; padding: 8px 0;")
-        layout.addWidget(desc)
-
-    def getConfig(self) -> dict:
-        return {
-            "client_id": self.client_id_edit.text().strip(),
-            "client_secret": self.client_secret_edit.text().strip(),
-            "access_token": self.access_token_edit.text().strip(),
-        }
-
-    def setConfig(self, cfg: dict):
-        self.client_id_edit.setText(cfg.get("client_id", ""))
-        self.client_secret_edit.setText(cfg.get("client_secret", ""))
-        self.access_token_edit.setText(cfg.get("access_token", ""))
 
 
 class BusinessHoursCard(CardWidget):
@@ -356,14 +366,14 @@ class SettingUI(QFrame):
 
         # 创建配置卡片
         self.llm_config_card = LLMConfigCard()
+        self.vision_llm_config_card = VisionLLMConfigCard()
         self.prompt_config_card = PromptConfigCard()
         self.business_hours_card = BusinessHoursCard()
-        self.pdd_open_config_card = PddOpenConfigCard()
 
         content_layout.addWidget(self.llm_config_card)
+        content_layout.addWidget(self.vision_llm_config_card)
         content_layout.addWidget(self.prompt_config_card)
         content_layout.addWidget(self.business_hours_card)
-        content_layout.addWidget(self.pdd_open_config_card)
         content_layout.addStretch()
 
         # 设置容器样式
@@ -388,16 +398,16 @@ class SettingUI(QFrame):
                     "api_key": config.get("llm.api_key", ""),
                     "model_name": config.get("llm.model_name", "doubao-seed-1-6-flash-250828")
                 },
+                "vision_llm": {
+                    "api_base": config.get("vision_llm.api_base", ""),
+                    "api_key": config.get("vision_llm.api_key", ""),
+                    "model_name": config.get("vision_llm.model_name", "")
+                },
                 "prompt": {
                     "instructions": config.get("prompt.instructions", [])
                 },
                 "business_hours": {
                     "enabled": config.get("business_hours.enabled", True),
-                },
-                "pdd_open": {
-                    "client_id": config.get("pdd_open.client_id", ""),
-                    "client_secret": config.get("pdd_open.client_secret", ""),
-                    "access_token": config.get("pdd_open.access_token", ""),
                 }
             }
 
@@ -434,6 +444,11 @@ class SettingUI(QFrame):
                 "api_key": "",
                 "model_name": "doubao-seed-1-6-flash-250828"
             }),
+            "vision_llm": config_data.get("vision_llm", {
+                "api_base": "",
+                "api_key": "",
+                "model_name": ""
+            }),
             "prompt": config_data.get("prompt", {
                 "instructions": []
             }),
@@ -451,27 +466,25 @@ class SettingUI(QFrame):
 
         # 设置到界面
         self.llm_config_card.setConfig(validated_config["llm"])
+        self.vision_llm_config_card.setConfig(validated_config["vision_llm"])
         self.prompt_config_card.setConfig(validated_config["prompt"])
 
         self.business_hours_card.setConfig({"business_hours": validated_config["business_hours"]})
-        self.pdd_open_config_card.setConfig(validated_config.get("pdd_open", {}))
 
     def onSaveConfig(self):
         """保存配置到config模块"""
         try:
             # 获取各配置卡片的配置
             llm_config = self.llm_config_card.getConfig()
+            vision_llm_config = self.vision_llm_config_card.getConfig()
             prompt_config = self.prompt_config_card.getConfig()
             business_config = self.business_hours_card.getConfig()
 
-            # 合并配置为新的结构
-            pdd_open_config = self.pdd_open_config_card.getConfig()
-
             new_config = {
                 "llm": llm_config,
+                "vision_llm": vision_llm_config,
                 "prompt": prompt_config,
                 "business_hours": business_config.get("business_hours", {"enabled": True}),
-                "pdd_open": pdd_open_config,
                 "db_path": config.get("db_path", "")
             }
 

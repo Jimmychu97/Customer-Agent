@@ -22,7 +22,15 @@ class ModelType(str, Enum):
     CLAUDE = "claude"
 
 class LLMConfig(BaseModel):
-    """LLM 配置模型"""
+    """LLM 配置模型（文本对话）"""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_name: str = Field(default="", description="模型名称")
+    api_key: str = Field(default="", description="API密钥")
+    api_base: str = Field(default="", description="API地址")
+
+
+class VisionLLMConfig(BaseModel):
+    """视觉LLM配置模型（图片识别）"""
     model_config = ConfigDict(arbitrary_types_allowed=True)
     model_name: str = Field(default="", description="模型名称")
     api_key: str = Field(default="", description="API密钥")
@@ -75,7 +83,11 @@ class ConfigModel(BaseModel):
     )
     llm: LLMConfig = Field(
         default_factory=LLMConfig,
-        description="LLM配置"
+        description="LLM配置（文本对话）"
+    )
+    vision_llm: VisionLLMConfig = Field(
+        default_factory=VisionLLMConfig,
+        description="视觉LLM配置（图片识别）"
     )
     prompt: PromptConfig = Field(
         default_factory=PromptConfig,
@@ -108,6 +120,11 @@ config_base = {
         "image_reply_enabled": True
     },
     "llm": {
+        "model_name": "",
+        "api_key": "",
+        "api_base": ""
+    },
+    "vision_llm": {
         "model_name": "",
         "api_key": "",
         "api_base": ""
