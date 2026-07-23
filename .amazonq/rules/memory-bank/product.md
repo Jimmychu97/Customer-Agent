@@ -1,57 +1,66 @@
-# Product Overview: Agent-Customer
+# Product Overview
 
-## Purpose
-电商AI客服桌面应用程序，专为拼多多平台商家设计。通过 WebSocket 实时接收买家消息，结合 AI 大模型实现智能自动回复，减少人工客服工作量。
+## Project Purpose
+Agent-Customer is an e-commerce AI customer service desktop application built with PyQt6. It integrates with the Pinduoduo (拼多多) platform via WebSocket for real-time message reception and uses AI large language models to provide intelligent automated replies.
 
 ## Value Proposition
-- 7×24 小时 AI 自动回复，降低人工客服成本
-- 双知识库体系确保回复准确性（客服知识库 + 产品知识库）
-- 双验机平台自动路由（苹果→真心验机，安卓→GSX验机），核销后自动发送验机报告
-- 支持任意 OpenAI 兼容 LLM 接口，灵活切换模型
+- Automates customer service responses for e-commerce merchants on Pinduoduo
+- Reduces manual workload through AI-powered replies backed by a dual knowledge base
+- Supports device verification (验机) workflows for second-hand electronics sellers
+- Enables proactive product recommendations via AI agent tools
 
 ## Key Features
 
-### 消息接收
-- 拼多多平台 WebSocket 实时消息接收
-- 自动重连机制 + 心跳检测
-- Playwright 自动化登录/Cookie 刷新
+### Messaging & Communication
+- Real-time WebSocket message reception from Pinduoduo platform
+- Async message queue with handler chain for high-concurrency scenarios
+- Auto-reconnect with heartbeat detection for WebSocket connections
+- Keyword-triggered escalation to human agents
 
-### AI 智能回复
-- 自研 Agent 框架（不依赖 Agno 等第三方框架）
-- 多轮工具调用 + 会话上下文管理
-- 支持 DeepSeek、豆包、Kimi 等 OpenAI 兼容接口
+### AI Agent System (Custom Framework, no Agno dependency)
+- Multi-turn tool calling with session context management
+- Available tools:
+  - `search_customer_service_knowledge` — pre/post-sale knowledge base search
+  - `get_product_knowledge` — detailed product info (ingredients, specs, usage, price)
+  - `get_shop_products` — fetch shop product list
+  - `send_goods_link` — send product card to user
+  - `transfer_conversation` — escalate to human agent
 
-### AI Agent 工具集
-| 工具 | 功能 |
-|------|------|
-| `search_customer_service_knowledge` | 搜索客服知识库（售前/售后/商品解答） |
-| `get_product_knowledge` | 查询商品详细知识（成分/规格/用法/价格） |
-| `get_shop_products` | 获取店铺商品列表 |
-| `send_goods_link` | 向用户发送商品卡片 |
-| `transfer_conversation` | 转接人工客服 |
+### Dual Knowledge Base
+- Customer service knowledge base (pre-sale, post-sale, product Q&A)
+- Product knowledge base (auto-extracted via multimodal LLM from Pinduoduo API)
 
-### 验机平台集成
-- 苹果设备 → 真心验机（iunlock8.com）
-- 安卓设备 → GSX 验机（gkdt.com）
-- 核销完成后自动查询报告并生成简析发送给用户
+### Device Verification (验机) Workflows
+- Apple devices → Zhenxin (真心验机, iunlock8.com) or Lingsu (凌速) API
+- Android devices → GSX verification (gkdt.com)
+- LLM-generated analysis report sent to customer after verification
+- Automatic routing based on device type field in product SKU config
 
-### 知识库管理
-- 客服知识库：售前咨询、商品说明、售后政策
-- 产品知识库：从拼多多 API 拉取商品，调用多模态 LLM 提取产品知识入库
-- 基于 jieba 中文分词的知识检索
+### Product Management
+- Sync product SKUs from Pinduoduo API
+- Configure ServerId, device type, and verification platform per SKU
+- Auto-extract product knowledge using multimodal LLM
 
-### 其他功能
-- 关键词触发转人工服务
-- 异步消息队列 + 处理器链（高并发支持）
-- 商品 SKU 同步管理
-- 营业时间配置（默认 08:00-23:00）
+### UI (PyQt6 + pyqt6-fluent-widgets)
+- Account management (Pinduoduo login, Cookie management)
+- Auto-reply management (start/stop per account)
+- Product management (SKU sync, verification config)
+- Knowledge base management (add/edit customer service knowledge)
+- Keyword management (configure human-escalation triggers)
+- Settings page (LLM config, business hours, prompt instructions)
+- Log viewer, message viewer, voucher management
 
 ## Target Users
-- 拼多多平台中小商家
-- 需要降低客服人力成本的电商运营团队
-- 销售二手手机/数码设备的商家（验机功能）
+- Pinduoduo merchants selling second-hand electronics (phones, tablets)
+- Small-to-medium e-commerce businesses needing automated customer service
+- Merchants requiring device verification report delivery automation
 
-## Supported Platforms
-- Windows 操作系统（桌面应用）
-- Python >= 3.11
-- 拼多多平台（WebSocket 接入）
+## Business Hours & Control
+- Configurable AI auto-reply hours (default 08:00–23:00)
+- Toggle for image-triggered auto-reply
+- Per-account enable/disable of auto-reply
+
+## Deployment
+- Windows desktop application
+- Packaged as standalone exe via PyInstaller (no Python required on target machine)
+- Playwright Chromium used for Pinduoduo login and Cookie refresh

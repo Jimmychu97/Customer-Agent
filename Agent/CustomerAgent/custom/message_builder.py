@@ -16,6 +16,9 @@ from Agent.CustomerAgent.tools.get_product_list import (
 
 logger = get_logger("MessageBuilder")
 
+# 验机报告关键词，用于检测历史中是否已有报告
+_REPORT_KEYWORDS = ("验机报告", "GSX", "凌速", "[已完成 GSX 验机查询]", "[已完成凌速验机查询]")
+
 
 class MessageBuilder:
     """消息构建器"""
@@ -68,6 +71,7 @@ class MessageBuilder:
 - 用途：查任何客服知识，包括售前、售后、商品功能、使用方法、电池、物流、退换货等一切问题
 - 参数：query（关键词）、shop_id（店铺ID）
 - 【强制规则】：用户发送任何文字问题，必须第一个调用此工具，不得跳过！
+- 【重要例外】：如果对话历史中已有验机报告（assistant消息含"验机报告"、"GSX"、"凌速"等内容），用户针对该报告提问时（如问电池健康、激活日期、保修、锁机状态等），直接基于报告内容回答，禁止调用任何工具！
 - 示例：用户问"电池能查吗""可以退货吗""怎么用"→均必须先调用此工具
 
 3️⃣ send_goods_link（发送商品卡片）
@@ -140,6 +144,29 @@ class MessageBuilder:
             logger.warning(f"动态获取商品列表失败: {e}")
             dependencies["product_list"] = "获取商品列表失败"
 
+    @staticmethod
+    def _find_report_in_history(history: List[Dict[str, Any]]) -> Optional[str]:
+        """
+        检测历史消息中是否已有验机报告
+
+        Args:
+            history: 历史消息列表
+
+        Returns:
+            报告内容字符串，未找到返回 None
+        """
+        for msg in reversed(history):
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content") or ""
+            if isinstance(content, list):
+                content = " ".join(
+                    part.get("text", "") for part in content if isinstance(part, dict)
+                )
+            if any(kw in content for kw in _REPORT_KEYWORDS):
+                return content
+        return None
+
     def build_messages(
         self,
         query: str,
@@ -180,6 +207,17 @@ class MessageBuilder:
                 content += session_info
 
             messages.append({"role": "system", "content": content})
+
+        # 检测历史中是否有验机报告，有则注入提示让 AI 优先基于报告回答
+        report_content = self._find_report_in_history(history)
+        if report_content:
+            hint = (
+                "【验机报告提示】对话历史中已包含该用户的验机报告。"
+                "用户后续关于该设备的任何问题（电池、激活、保修、锁机、维修记录等），"
+                "必须直接基于报告内容回答，禁止调用工具查询！"
+            )
+            messages.append({"role": "system", "content": hint})
+            logger.debug("[MessageBuilder] 检测到历史验机报告，已注入提示")
 
         # 历史消息
         for msg in history:

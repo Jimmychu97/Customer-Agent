@@ -30,8 +30,17 @@ def _normalize_number(text: str) -> str:
 
 
 def _extract_imei(text: str) -> Optional[str]:
-    """提取 IMEI（15位数字 + Luhn校验，支持任意分隔符/空格格式）"""
-    # 匹配由数字和空格/连字符组成、去空格后为15位的片段
+    """提取 IMEI（15位数字，支持任意分隔符/空格格式）
+
+    优先匹配 IMEI: 前缀（图片OCR场景，跳过Luhn校验避免OCR误差导致漏提取），
+    再匹配通用15位数字并做Luhn校验。
+    """
+    # 第一轮：明确带 IMEI: 前缀，直接提取（OCR场景，不做Luhn校验）
+    for m in re.finditer(r'IMEI[:\s]*([\d][\d\s\-]{13,22}[\d])', text, re.IGNORECASE):
+        candidate = _normalize_number(m.group(1))
+        if len(candidate) == 15 and candidate.isdigit():
+            return candidate
+    # 第二轮：通用匹配，做Luhn校验
     for m in re.finditer(r'(?<![\w])([\d][\d\s\-]{13,22}[\d])(?![\w])', text):
         candidate = _normalize_number(m.group(1))
         if len(candidate) == 15 and candidate.isdigit() and _luhn_check(candidate):
@@ -42,7 +51,7 @@ def _extract_imei(text: str) -> Optional[str]:
 def _extract_serial(text: str) -> Optional[str]:
     """提取苹果序列号（10或12位字母数字，支持带空格格式）
     - 字符集：A-Z + 0-9，排除 I、O
-    - 必须同时含字母和数字
+    - 必须含至少一个字母（允许全字母，如 KHFDFDWWHN）
     - 用户输入的 o/O 自动替换为 0
     """
     APPLE_CHARS = r'[A-HJ-NP-Z0-9]'
@@ -53,7 +62,8 @@ def _extract_serial(text: str) -> Optional[str]:
             rf'(?<![A-Z0-9])({APPLE_CHARS}{{{length}}})(?![A-Z0-9])', normalized
         ):
             val = m.group(1)
-            if re.search(r'[A-Z]', val) and re.search(r'[0-9]', val):
+            # 必须含至少一个字母（排除纯数字串被误识别为序列号）
+            if re.search(r'[A-Z]', val):
                 return val
     return None
 
@@ -91,8 +101,11 @@ def _extract_coupon(text: str, exclude_imei: str = None) -> Optional[str]:
             return candidate
 
     # 第三轮：连续数字串超出范围（如15-16位），尝试从右截取12位
+    # 注意：如果该数字串本身就是 IMEI（已被 exclude_imei 排除），跳过整串
     for m in re.finditer(r'(?<!\d)(\d{15,18})(?!\d)', text):
         raw = m.group(1)
+        if exclude_imei and raw == exclude_imei:
+            continue
         for length in (12, 10):
             candidate = raw[-length:]
             if not _is_phone(candidate):
@@ -208,12 +221,44 @@ class VoucherDetectionHandler(BaseHandler):
 
     async def handle(self, context: Context, metadata: Dict[str, Any]) -> bool:
         content = context.content or ""
-        sn = _extract_imei(content) or _extract_serial(content)
-        coupon_no = _extract_coupon(content, exclude_imei=sn)
 
-        from_uid = metadata.get("from_uid")
-        shop_id = metadata.get("shop_id")
-        user_id = metadata.get("user_id")
+        # 图片来源时直接使用 ai_handler 已提取好的值，不重新提取
+        # 避免 IMEI2 等被误截为卡券号
+        if "_image_sn" in metadata or "_image_coupon" in metadata:
+            sn = metadata.get("_image_sn")
+            coupon_no = metadata.get("_image_coupon")
+            from_uid = metadata.get("from_uid")
+            shop_id = metadata.get("shop_id")
+            user_id = metadata.get("user_id")
+            self.logger.info(f"[核销] 图片来源，使用预提取值 sn={sn!r} coupon={coupon_no!r}")
+        else:
+            sn = _extract_imei(content) or _extract_serial(content)
+
+            # 根据已有待核销订单的缺失项，决定本条消息只提取哪一类信息：
+            # - 已有 coupon 缺 sn → 只提取 sn/IMEI，避免 IMEI2 等被误截为 coupon
+            # - 已有 sn 缺 coupon → 只提取 coupon，避免序列号干扰
+            from_uid = metadata.get("from_uid")
+            shop_id = metadata.get("shop_id")
+            pending = self._get_pending_order_state(shop_id, from_uid)
+            if pending == "need_sn":
+                coupon_no = None
+            elif pending == "need_coupon":
+                long_numbers = re.findall(r'(?<!\d)(\d{14,})(?!\d)', content)
+                sn = None
+                coupon_no = None
+                for m in re.finditer(r'(?<!\d)(\d+(?:[ \t\-]+\d+)+|\d{10,13})(?!\d)', content):
+                    candidate = _normalize_number(m.group(1)) if ' ' in m.group(1) or '-' in m.group(1) else m.group(1)
+                    if not candidate.isdigit() or not (10 <= len(candidate) <= 13):
+                        continue
+                    if _is_phone(candidate):
+                        continue
+                    if any(candidate in ln or ln in candidate for ln in long_numbers):
+                        continue
+                    coupon_no = candidate
+                    break
+            else:
+                coupon_no = _extract_coupon(content, exclude_imei=sn)
+            user_id = metadata.get("user_id")
 
         if not all([shop_id, user_id, from_uid]):
             self.logger.warning(
@@ -281,8 +326,9 @@ class VoucherDetectionHandler(BaseHandler):
             return True
 
         # 同一条消息里两个都有 → 直接核销
-        _, __, order_id = await self._upsert_order(sn, coupon_no, shop_id, from_uid)
-        reply, _ = await self._do_verify(sn, coupon_no, shop_id, user_id, from_uid, order_id)
+        # 用 _upsert_order 返回的 final 值，避免消息里误提取的 coupon 覆盖已存的正确值
+        final_sn, final_coupon, order_id = await self._upsert_order(sn, coupon_no, shop_id, from_uid)
+        reply, _ = await self._do_verify(final_sn, final_coupon, shop_id, user_id, from_uid, order_id)
         if reply:
             await self._send(shop_id, user_id, from_uid, reply)
             self._record_message(session_id, "assistant", reply)
@@ -337,6 +383,39 @@ class VoucherDetectionHandler(BaseHandler):
         except Exception as e:
             self.logger.error(f"[核销] 建单失败: {e}")
             return sn or "", coupon_no or "", None
+
+    def _get_pending_order_state(self, shop_id: str, from_uid: str) -> Optional[str]:
+        """查询待核销订单的缺失项
+
+        Returns:
+            'need_sn'     - 已有 coupon 缺 sn
+            'need_coupon' - 已有 sn 缺 coupon
+            None          - 无待核销订单
+        """
+        if not shop_id or not from_uid:
+            return None
+        try:
+            from database import db_manager
+            from database.models import Order
+            from datetime import datetime as dt, timedelta
+            ten_min_ago = dt.now() - timedelta(minutes=10)
+            with db_manager.session_scope() as session:
+                order = session.query(Order).filter(
+                    Order.shop_id == shop_id,
+                    Order.session_id == from_uid,
+                    Order.status == 0,
+                    Order.created_at >= ten_min_ago,
+                ).order_by(Order.id.desc()).first()
+                if not order:
+                    return None
+                if order.coupons and not order.sn_imei:
+                    return "need_sn"
+                if order.sn_imei and not order.coupons:
+                    return "need_coupon"
+                return None
+        except Exception as e:
+            self.logger.warning(f"[核销] 查询待核销订单失败: {e}")
+            return None
 
     async def _do_verify(
         self,
@@ -546,18 +625,17 @@ class VoucherDetectionHandler(BaseHandler):
     async def _llm_analyze_lingsu(self, report_text: str, session_id: str) -> str:
         """苹果凌速验机报告 LLM 分析"""
         try:
-            # 复用 CustomerAgent 的 LLM 客户端
-            from core.di_container import container
-            from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
-            
-            agent = container.get(CustomerAgent)
-            if not agent._is_initialized:
-                await agent.initialize_async()
-            
-            # 优先使用视觉LLM分析图片类报告，否则用文本LLM
-            llm_client = agent._vision_client or agent._llm_client
-            model_type = "视觉LLM" if agent._vision_client else "文本LLM"
-            self.logger.info(f"[凌速分析] 使用 {model_type} ({llm_client.model_name})")
+            from Agent.CustomerAgent.custom.llm_client import LLMClient
+            from Agent.CustomerAgent.custom.agent_config import AgentConfig
+            agent_config = AgentConfig.load_from_config()
+            llm_client = LLMClient(
+                model_name=agent_config.model_name,
+                api_key=agent_config.api_key,
+                api_base=agent_config.api_base,
+                temperature=agent_config.temperature,
+            )
+            await llm_client.initialize()
+            self.logger.info(f"[凌速分析] 使用 LLM ({llm_client.model_name})")
 
             prompt = (
                 "你是一名专业的苹果验机顾问。根据以下验机报告，"
@@ -584,13 +662,7 @@ class VoucherDetectionHandler(BaseHandler):
             if analysis:
                 self.logger.info(f"[核销] 凌速分析完成，长度={len(analysis)}")
                 session_content += f"\n\n分析：\n{analysis}"
-
-            # 使用 Agent 的 session_manager
-            agent._session_manager.add_message(
-                session_id=session_id,
-                role="assistant",
-                content=session_content,
-            )
+            self._record_message(session_id, "assistant", session_content)
             return analysis
 
         except Exception as e:
@@ -609,6 +681,8 @@ class VoucherDetectionHandler(BaseHandler):
             from database import db_manager
             from database.models import Order
 
+            self.logger.info(f"[核销] _query_gsx_and_send gsx_data={type(gsx_data).__name__} empty={not gsx_data}")
+
             if not gsx_data:
                 self.logger.warning(f"[核销] 无 GSX 数据，跳过报告发送 sn={serial}")
                 if voucher_success_text:
@@ -623,6 +697,7 @@ class VoucherDetectionHandler(BaseHandler):
                     order.gsx_result = json.dumps(gsx_data, ensure_ascii=False)
 
             gsx_text = _format_gsx_result(gsx_data)
+            self.logger.info(f"[核销] gsx_text 长度={len(gsx_text)} 内容预览={gsx_text[:80]!r}")
             fixed = "亲，五行好平+关注+收藏+截图+文字好平赏个。以后有关于这部机器的验机问题，都可以随时联系美高技术员，技术员将为您解答！非常感谢您选择我们,祝你购机愉快~"
             session_id = f"pinduoduo{from_uid}"
 
@@ -647,18 +722,17 @@ class VoucherDetectionHandler(BaseHandler):
     async def _llm_analyze_gsx(self, gsx_text: str, session_id: str) -> str:
         """用 LLM 分析 GSX 报告，并将结果写入会话历史"""
         try:
-            # 复用 CustomerAgent 的 LLM 客户端
-            from core.di_container import container
-            from Agent.CustomerAgent.custom.customer_agent import CustomerAgent
-            
-            agent = container.get(CustomerAgent)
-            if not agent._is_initialized:
-                await agent.initialize_async()
-            
-            # 优先使用视觉LLM分析图片类报告，否则用文本LLM
-            llm_client = agent._vision_client or agent._llm_client
-            model_type = "视觉LLM" if agent._vision_client else "文本LLM"
-            self.logger.info(f"[GSX分析] 使用 {model_type} ({llm_client.model_name})")
+            from Agent.CustomerAgent.custom.llm_client import LLMClient
+            from Agent.CustomerAgent.custom.agent_config import AgentConfig
+            agent_config = AgentConfig.load_from_config()
+            llm_client = LLMClient(
+                model_name=agent_config.model_name,
+                api_key=agent_config.api_key,
+                api_base=agent_config.api_base,
+                temperature=agent_config.temperature,
+            )
+            await llm_client.initialize()
+            self.logger.info(f"[GSX分析] 使用 LLM ({llm_client.model_name})")
 
             prompt = (
                 "你是一名专业的苹果验机顾问。根据以下 GSX 验机报告，"
@@ -681,18 +755,11 @@ class VoucherDetectionHandler(BaseHandler):
             )
             analysis = (response.content or "").strip()
 
-            # 把 GSX 报告和分析写入会话历史
             session_content = f"[已完成 GSX 验机查询]\n验机报告：\n{gsx_text}"
             if analysis:
                 self.logger.info(f"[核销] GSX分析完成，长度={len(analysis)}")
                 session_content += f"\n\n分析：\n{analysis}"
-
-            # 使用 Agent 的 session_manager
-            agent._session_manager.add_message(
-                session_id=session_id,
-                role="assistant",
-                content=session_content,
-            )
+            self._record_message(session_id, "assistant", session_content)
             return analysis
 
         except Exception as e:

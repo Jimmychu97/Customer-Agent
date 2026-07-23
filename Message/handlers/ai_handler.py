@@ -133,11 +133,31 @@ class AIReplyHandler(BaseHandler):
 
             if metadata:
                 from Message.handlers.voucher_handler import (
-                    _extract_imei, _extract_serial, _extract_coupon, VoucherDetectionHandler
+                    _extract_imei, _extract_serial, _extract_coupon,
+                    VoucherDetectionHandler
                 )
-                sn = _extract_imei(recognized_text) or _extract_serial(recognized_text)
-                coupon = _extract_coupon(recognized_text, exclude_imei=sn)
-                self.logger.info(f"[图片识别] 提取结果 sn={sn!r} coupon={coupon!r}")
+                shop_id = metadata.get("shop_id")
+                from_uid = metadata.get("from_uid")
+
+                # 根据待核销订单缺失项，决定图片只提取哪一种信息
+                # 一张图片只对应一个条件（序列号/IMEI 或 卡券号），不同时提取两种
+                handler = VoucherDetectionHandler()
+                pending = handler._get_pending_order_state(shop_id, from_uid)
+
+                if pending == "need_coupon":
+                    # 已有 sn，图片应该是卡券截图，只提取卡券号
+                    sn = None
+                    coupon = _extract_coupon(recognized_text)
+                elif pending == "need_sn":
+                    # 已有 coupon，图片应该是序列号/IMEI截图，只提取 sn
+                    sn = _extract_imei(recognized_text) or _extract_serial(recognized_text)
+                    coupon = None
+                else:
+                    # 无待核销订单，先尝试提取 sn/IMEI，提取到了就不再提取 coupon
+                    sn = _extract_imei(recognized_text) or _extract_serial(recognized_text)
+                    coupon = None if sn else _extract_coupon(recognized_text)
+
+                self.logger.info(f"[图片识别] pending={pending!r} 提取结果 sn={sn!r} coupon={coupon!r}")
                 if sn or coupon:
                     self.logger.info("[图片识别] 转交 VoucherDetectionHandler 处理")
                     voucher_context = Context(
@@ -146,7 +166,9 @@ class AIReplyHandler(BaseHandler):
                         channel_type=context.channel_type,
                         kwargs=context.kwargs,
                     )
-                    await VoucherDetectionHandler().handle(voucher_context, metadata)
+                    # 传入已提取好的值，避免 handle 内部重新提取时误识别 IMEI2 等为卡券号
+                    image_metadata = {**metadata, "_image_sn": sn, "_image_coupon": coupon}
+                    await handler.handle(voucher_context, image_metadata)
                     return None  # 核销处理器已发送消息
                 self.logger.info("[图片识别] 未检测到核销信息，走普通AI回复")
 

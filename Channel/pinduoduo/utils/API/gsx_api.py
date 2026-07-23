@@ -49,7 +49,10 @@ def _build_sign(params: Dict[str, str], secret: str) -> str:
 
 def query_gsx(code: str, key: str) -> Dict[str, Any]:
     """
-    查询 GSX 验机信息
+    查询 GSX 验机信息（支持异步轮询）
+
+    GSX 是异步接口，首次请求可能返回"查询中"状态（code=201/202），
+    最多轮询 4 次，每次间隔 30 秒，总等待约 120 秒。
 
     Args:
         code: 序列号或 IMEI（变量，由用户消息提取）
@@ -79,25 +82,41 @@ def query_gsx(code: str, key: str) -> Dict[str, Any]:
     }
     params["sign"] = _build_sign(params, secret)
 
-    try:
-        resp = requests.get(_API_URL, params=params, timeout=30)
-        if resp.status_code != 200:
-            return {"success": False, "error_msg": f"HTTP {resp.status_code}"}
+    max_retries = 4
+    retry_interval = 30
 
-        text = resp.text.strip()
-        if not text or not text.startswith(("{", "[")):
-            logger.error(f"GSX接口返回非 JSON 响应 code={code} key={key}: {text[:100]!r}")
-            return {"success": False, "error_msg": f"GSX接口返回异常：{text[:100]}"}
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(_API_URL, params=params, timeout=120)
+            if resp.status_code != 200:
+                return {"success": False, "error_msg": f"HTTP {resp.status_code}"}
 
-        data = resp.json()
-        if data.get("code") != 200:
-            msg = data.get("message", "未知错误")
-            logger.warning(f"GSX查询业务失败 code={code} key={key}: {msg}")
-            return {"success": False, "error_msg": msg}
+            text = resp.text.strip()
+            if not text or not text.startswith(("{", "[")):
+                logger.error(f"GSX接口返回非 JSON 响应 code={code} key={key}: {text[:100]!r}")
+                return {"success": False, "error_msg": f"GSX接口返回异常：{text[:100]}"}
 
-        logger.info(f"GSX查询成功 code={code} key={key}")
-        return {"success": True, "data": data.get("data", data)}
+            data = resp.json()
+            biz_code = data.get("code")
 
-    except Exception as e:
-        logger.error(f"GSX查询失败 code={code} key={key}: {e}")
-        return {"success": False, "error_msg": str(e)}
+            # 查询中（异步未就绪），等待后重试
+            if biz_code in (201, 202, "201", "202"):
+                logger.info(f"GSX查询中（attempt={attempt+1}/{max_retries}），{retry_interval}s 后重试 code={code}")
+                if attempt < max_retries - 1:
+                    _time.sleep(retry_interval)
+                continue
+
+            if biz_code != 200:
+                msg = data.get("message", "未知错误")
+                logger.warning(f"GSX查询业务失败 code={code} key={key}: {msg}")
+                return {"success": False, "error_msg": msg}
+
+            logger.info(f"GSX查询成功 code={code} key={key} attempt={attempt+1}")
+            return {"success": True, "data": data.get("data", data)}
+
+        except Exception as e:
+            logger.error(f"GSX查询失败 code={code} key={key}: {e}")
+            return {"success": False, "error_msg": str(e)}
+
+    logger.error(f"GSX查询超时，{max_retries} 次轮询均未返回结果 code={code} key={key}")
+    return {"success": False, "error_msg": "GSX查询超时，请稍后重试"}
