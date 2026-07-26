@@ -74,6 +74,11 @@ class LingsuApiConfig(BaseModel):
     apikey: str = Field(default="", description="API 密钥")
 
 
+class GsxUnlockingConfig(BaseModel):
+    """gsxunlocking.com 验机查询接口配置"""
+    key: str = Field(default="", description="API 密钥")
+
+
 class ConfigModel(BaseModel):
     """配置模型"""
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -108,6 +113,10 @@ class ConfigModel(BaseModel):
     lingsu_api: LingsuApiConfig = Field(
         default_factory=LingsuApiConfig,
         description="灵速验机查询配置"
+    )
+    gsxunlocking: GsxUnlockingConfig = Field(
+        default_factory=GsxUnlockingConfig,
+        description="gsxunlocking.com 验机配置"
     )
     db_path: str = Field(default="", description="数据库路径")
 
@@ -147,6 +156,9 @@ config_base = {
         "api_base": "",
         "username": "",
         "apikey": ""
+    },
+    "gsxunlocking": {
+        "key": ""
     },
     "prompt": {
         "instructions": [

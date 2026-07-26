@@ -436,7 +436,7 @@ class VoucherDetectionHandler(BaseHandler):
         if status == _VOUCHER_SUCCESS and gsx_params:
             goods_id, spec, report_data, device_type = gsx_params
             if device_type == "apple":
-                await self._query_lingsu_and_send(sn, goods_id, spec, report_data, order_id, shop_id, user_id, from_uid, result_text)
+                await self._query_gsxunlocking_and_send(sn, goods_id, spec, report_data, order_id, shop_id, user_id, from_uid, result_text)
             else:
                 await self._query_gsx_and_send(sn, goods_id, spec, report_data, order_id, shop_id, user_id, from_uid, result_text)
             return None, status  # 核销成功时消息已在 _query_gsx_and_send 里全部发送
@@ -481,18 +481,18 @@ class VoucherDetectionHandler(BaseHandler):
         report_data = None
 
         if device_type == "apple" and zhenxin_sid:
-            from Channel.pinduoduo.utils.API.lingsu_gsx_api import query_lingsu
-            zx_result = query_lingsu(serial, zhenxin_sid)
+            from Channel.pinduoduo.utils.API.gsxunlocking_api import query_gsxunlocking
+            zx_result = query_gsxunlocking(serial, zhenxin_sid)
             if not zx_result["success"]:
                 self.logger.warning(
-                    f"[核销] 凌速查询失败，序列号可能有误 sn={serial}: {zx_result.get('error_msg')}"
+                    f"[核销] GsxUnlocking查询失败，序列号可能有误 sn={serial}: {zx_result.get('error_msg')}"
                 )
                 self._clear_order_sn(order_id)
                 return (
                     f"序列号/IMEI 查询失败，可能有误：{zx_result.get('error_msg', '未知错误')}\n"
                     f"请重新提供正确的序列号或IMEI码"
                 ), None
-            report_data = zx_result["result"]  # 纯文本
+            report_data = zx_result["result"]  # dict
         elif server_id:
             from Channel.pinduoduo.utils.API.gsx_api import query_gsx
             gsx_result = query_gsx(serial, server_id)
@@ -575,6 +575,55 @@ class VoucherDetectionHandler(BaseHandler):
                     order.coupons = ""
         except Exception as e:
             self.logger.error(f"[核销] 清空 coupons 失败 order_id={order_id}: {e}")
+
+    async def _query_gsxunlocking_and_send(
+        self, serial: str, goods_id: str, spec: str, report_data,
+        order_id: int, shop_id: str, user_id: str, from_uid: str,
+        voucher_success_text: str = ""
+    ) -> None:
+        """发送 GsxUnlocking 报告（苹果设备）
+        发送顺序：验机报告 → AI分析 → 核销成功 → 五星好评
+        """
+        try:
+            from database import db_manager
+            from database.models import Order
+
+            if not report_data:
+                self.logger.warning(f"[核销] 无 GsxUnlocking 数据，跳过报告发送 sn={serial}")
+                if voucher_success_text:
+                    await self._send(shop_id, user_id, from_uid, voucher_success_text)
+                return
+
+            query_cfg = self._get_query_config(goods_id, spec)
+            with db_manager.session_scope() as session:
+                order = session.query(Order).filter_by(id=order_id).first()
+                if order:
+                    order.sku_id = query_cfg.get("zhenxin_server_id") or ""
+                    order.gsx_result = str(report_data)
+
+            # format=text 时 result 直接是纯文本字符串
+            report_text = str(report_data)
+
+            fixed = "亲，五行好平+关注+收藏+截图+文字好平赏个。以后有关于这部机器的验机问题，都可以随时联系美高技术员，技术员将为您解答！非常感谢您选择我们,祝你购机愉快~"
+            session_id = f"pinduoduo{from_uid}"
+
+            # 1. 发送验机报告
+            await self._send(shop_id, user_id, from_uid, report_text)
+
+            # 2. LLM 分析（复用 GSX 分析逻辑）
+            analysis = await self._llm_analyze_gsx(report_text, session_id)
+            if analysis:
+                await self._send(shop_id, user_id, from_uid, analysis)
+
+            # 3. 核销成功消息
+            if voucher_success_text:
+                await self._send(shop_id, user_id, from_uid, voucher_success_text)
+
+            # 4. 固定结语
+            await self._send(shop_id, user_id, from_uid, fixed)
+
+        except Exception as e:
+            self.logger.opt(exception=True).error(f"[核销] GsxUnlocking报告发送失败: {e}")
 
     async def _query_lingsu_and_send(
         self, serial: str, goods_id: str, spec: str, report_text: Optional[str],
