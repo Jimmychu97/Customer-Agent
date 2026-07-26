@@ -27,8 +27,30 @@ _semaphore = threading.Semaphore(20)
 
 
 def _get_cfg() -> Dict[str, str]:
-    from config import config
-    return {"key": config.get("gsxunlocking.key", "")}
+    try:
+        # 尝试从项目根目录导入 config
+        import sys
+        import os
+        # 添加项目根目录到 sys.path
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        
+        from config import config
+        return {"key": config.get("gsxunlocking.key", "")}
+    except ImportError:
+        # 如果导入失败，尝试直接读取 config.json
+        import json
+        import os
+        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))), "config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config_data = json.load(f)
+                return {"key": config_data.get("gsxunlocking", {}).get("key", "")}
+            except Exception:
+                return {"key": ""}
+        return {"key": ""}
 
 
 def query_gsxunlocking(imei: str, srv: str) -> Dict[str, Any]:
@@ -76,23 +98,35 @@ def query_gsxunlocking(imei: str, srv: str) -> Dict[str, Any]:
             logger.error(f"GsxUnlocking 返回空响应 imei={imei} srv={srv}")
             return {"success": False, "error_msg": "接口返回空响应"}
 
-        # 无论 format=text 还是 json，code 字段始终在 JSON 中
+        # 处理 format=text 的情况，API 返回纯文本
+        # 检查响应内容是否包含错误信息
+        if "error" in text.lower() or "fail" in text.lower() or "invalid" in text.lower():
+            logger.warning(f"GsxUnlocking 查询失败 imei={imei} srv={srv}: {text[:100]!r}")
+            return {"success": False, "error_msg": text[:200]}
+        
+        # 检查是否有明显的成功标志
+        if "iphone" in text.lower() or "imei" in text.lower() or "sn:" in text.lower():
+            logger.info(f"GsxUnlocking 查询成功 imei={imei} srv={srv}")
+            return {"success": True, "result": text}
+        
+        # 尝试解析为 JSON（如果 format=json 时）
         try:
             data = resp.json()
             item = data[0] if isinstance(data, list) else data
             code = item.get("code")
+            
+            if code != 0:
+                msg = item.get("result") or item.get("message") or item.get("msg") or "未知错误"
+                logger.warning(f"GsxUnlocking 查询失败 imei={imei} srv={srv}: {msg}")
+                return {"success": False, "error_msg": str(msg)}
+            
+            result_text = item.get("result", text)
+            logger.info(f"GsxUnlocking 查询成功 imei={imei} srv={srv}")
+            return {"success": True, "result": result_text}
         except Exception:
-            logger.error(f"GsxUnlocking 返回非 JSON imei={imei} srv={srv}: {text[:100]!r}")
-            return {"success": False, "error_msg": f"接口返回异常：{text[:100]}"}
-
-        if code != 0:
-            msg = item.get("result") or item.get("message") or item.get("msg") or "未知错误"
-            logger.warning(f"GsxUnlocking 查询失败 imei={imei} srv={srv}: {msg}")
-            return {"success": False, "error_msg": str(msg)}
-
-        result_text = item.get("result", text)
-        logger.info(f"GsxUnlocking 查询成功 imei={imei} srv={srv}")
-        return {"success": True, "result": result_text}
+            # 不是 JSON，但也不是明显的错误，可能是其他格式的文本
+            logger.info(f"GsxUnlocking 查询返回文本 imei={imei} srv={srv}: {text[:100]!r}")
+            return {"success": True, "result": text}
 
     except Exception as e:
         logger.error(f"GsxUnlocking 查询异常 imei={imei} srv={srv}: {e}")
