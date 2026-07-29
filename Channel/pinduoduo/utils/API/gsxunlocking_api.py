@@ -77,7 +77,6 @@ def query_gsxunlocking(imei: str, srv: str) -> Dict[str, Any]:
         return {"success": False, "error_msg": "GsxUnlocking srv 未传入"}
 
     params = {
-        "format": "text",
         "key": key,
         "srv": srv,
         "imei": imei,
@@ -98,35 +97,26 @@ def query_gsxunlocking(imei: str, srv: str) -> Dict[str, Any]:
             logger.error(f"GsxUnlocking 返回空响应 imei={imei} srv={srv}")
             return {"success": False, "error_msg": "接口返回空响应"}
 
-        # 处理 format=text 的情况，API 返回纯文本
-        # 检查响应内容是否包含错误信息
-        if "error" in text.lower() or "fail" in text.lower() or "invalid" in text.lower():
-            logger.warning(f"GsxUnlocking 查询失败 imei={imei} srv={srv}: {text[:100]!r}")
-            return {"success": False, "error_msg": text[:200]}
-        
-        # 检查是否有明显的成功标志
-        if "iphone" in text.lower() or "imei" in text.lower() or "sn:" in text.lower():
-            logger.info(f"GsxUnlocking 查询成功 imei={imei} srv={srv}")
-            return {"success": True, "result": text}
-        
-        # 尝试解析为 JSON（如果 format=json 时）
-        try:
-            data = resp.json()
-            item = data[0] if isinstance(data, list) else data
-            code = item.get("code")
-            
-            if code != 0:
-                msg = item.get("result") or item.get("message") or item.get("msg") or "未知错误"
-                logger.warning(f"GsxUnlocking 查询失败 imei={imei} srv={srv}: {msg}")
-                return {"success": False, "error_msg": str(msg)}
-            
-            result_text = item.get("result", text)
-            logger.info(f"GsxUnlocking 查询成功 imei={imei} srv={srv}")
-            return {"success": True, "result": result_text}
-        except Exception:
-            # 不是 JSON，但也不是明显的错误，可能是其他格式的文本
-            logger.info(f"GsxUnlocking 查询返回文本 imei={imei} srv={srv}: {text[:100]!r}")
-            return {"success": True, "result": text}
+        # JSON 解析（code=0 成功，code!=0 失败）
+        if text.startswith("{") or text.startswith("["):
+            try:
+                data = resp.json()
+                item = data[0] if isinstance(data, list) else data
+                code = item.get("code")
+                if code != 0:
+                    msg = item.get("result") or item.get("message") or item.get("msg") or "未知错误"
+                    logger.warning(f"GsxUnlocking 查询失败 imei={imei} srv={srv}: {msg}")
+                    return {"success": False, "error_msg": str(msg)}
+                result_text = item.get("result", text)
+                logger.info(f"GsxUnlocking 查询成功 imei={imei} srv={srv}")
+                return {"success": True, "result": result_text}
+            except (ValueError, KeyError) as e:
+                logger.warning(f"GsxUnlocking JSON 解析失败 imei={imei} srv={srv}: {e}")
+                return {"success": False, "error_msg": "响应解析失败"}
+
+        # 非 JSON 响应，无法判断结果，视为失败
+        logger.warning(f"GsxUnlocking 返回非 JSON 响应 imei={imei} srv={srv}: {text[:100]!r}")
+        return {"success": False, "error_msg": f"非预期响应格式: {text[:100]}"}
 
     except Exception as e:
         logger.error(f"GsxUnlocking 查询异常 imei={imei} srv={srv}: {e}")
