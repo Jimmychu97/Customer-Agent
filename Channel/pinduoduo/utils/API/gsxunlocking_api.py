@@ -13,6 +13,7 @@ gsxunlocking.com 验机查询 API
 响应格式：
     {"code": 0, "result": "验机报告文本"}  code=0 成功，code=1 失败
 """
+import re
 import threading
 import requests
 from typing import Dict, Any
@@ -77,6 +78,7 @@ def query_gsxunlocking(imei: str, srv: str) -> Dict[str, Any]:
         return {"success": False, "error_msg": "GsxUnlocking srv 未传入"}
 
     params = {
+        "format": "json",
         "key": key,
         "srv": srv,
         "imei": imei,
@@ -98,25 +100,24 @@ def query_gsxunlocking(imei: str, srv: str) -> Dict[str, Any]:
             return {"success": False, "error_msg": "接口返回空响应"}
 
         # JSON 解析（code=0 成功，code!=0 失败）
-        if text.startswith("{") or text.startswith("["):
-            try:
-                data = resp.json()
-                item = data[0] if isinstance(data, list) else data
-                code = item.get("code")
-                if code != 0:
-                    msg = item.get("result") or item.get("message") or item.get("msg") or "未知错误"
-                    logger.warning(f"GsxUnlocking 查询失败 imei={imei} srv={srv}: {msg}")
-                    return {"success": False, "error_msg": str(msg)}
-                result_text = item.get("result", text)
-                logger.info(f"GsxUnlocking 查询成功 imei={imei} srv={srv}")
-                return {"success": True, "result": result_text}
-            except (ValueError, KeyError) as e:
-                logger.warning(f"GsxUnlocking JSON 解析失败 imei={imei} srv={srv}: {e}")
-                return {"success": False, "error_msg": "响应解析失败"}
-
-        # 非 JSON 响应，无法判断结果，视为失败
-        logger.warning(f"GsxUnlocking 返回非 JSON 响应 imei={imei} srv={srv}: {text[:100]!r}")
-        return {"success": False, "error_msg": f"非预期响应格式: {text[:100]}"}
+        try:
+            data = resp.json()
+            item = data[0] if isinstance(data, list) else data
+            code = item.get("code")
+            if code != 0:
+                msg = item.get("result") or item.get("message") or item.get("msg") or "未知错误"
+                logger.warning(f"GsxUnlocking 查询失败 imei={imei} srv={srv}: {msg}")
+                return {"success": False, "error_msg": str(msg)}
+            result_text = item.get("result", "")
+            # 清理 HTML 标签，转为纯文本
+            result_text = re.sub(r'<br\s*/?>', '\n', result_text, flags=re.IGNORECASE)
+            result_text = re.sub(r'<[^>]+>', '', result_text)
+            result_text = result_text.strip()
+            logger.info(f"GsxUnlocking 查询成功 imei={imei} srv={srv}")
+            return {"success": True, "result": result_text}
+        except (ValueError, KeyError) as e:
+            logger.warning(f"GsxUnlocking JSON 解析失败 imei={imei} srv={srv}: {e}")
+            return {"success": False, "error_msg": "响应解析失败"}
 
     except Exception as e:
         logger.error(f"GsxUnlocking 查询异常 imei={imei} srv={srv}: {e}")
