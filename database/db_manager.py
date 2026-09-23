@@ -6,7 +6,7 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Dict, Any, Optional, Union, Generator
 from utils.logger_loguru import get_logger
-from database.models import Base, Channel, Shop, Account, Keyword
+from database.models import Base, Channel, Shop, Account, Keyword, MessageRecord
 
 
 class DatabaseManager:
@@ -488,6 +488,71 @@ class DatabaseManager:
             session.delete(keyword_obj)
             self.logger.info(f"成功删除关键词: {keyword}")
             return True
+
+    # ==================== 消息记录相关操作 ====================
+    def save_message(self, channel: str = "pinduoduo", shop_id: str = None, account_id: str = None,
+                     from_uid: str = None, nickname: str = None, msg_id: str = None,
+                     direction: str = "in", msg_type: str = None, content: str = None,
+                     raw_data: str = None) -> bool:
+        """保存一条聊天消息记录（客户发送或客服回复）"""
+        try:
+            with self.session_scope() as session:
+                record = MessageRecord(
+                    channel=channel or "pinduoduo",
+                    shop_id=str(shop_id) if shop_id is not None else "",
+                    account_id=str(account_id) if account_id is not None else None,
+                    from_uid=str(from_uid) if from_uid is not None else "",
+                    nickname=str(nickname) if nickname is not None else None,
+                    msg_id=str(msg_id) if msg_id is not None else None,
+                    direction=direction or "in",
+                    msg_type=str(msg_type) if msg_type is not None else None,
+                    content=content,
+                    raw_data=raw_data,
+                )
+                session.add(record)
+            return True
+        except Exception as e:
+            self.logger.error(f"保存消息记录失败: {e}")
+            return False
+
+    def get_recent_messages(self, shop_id: str, from_uid: str, limit: int = 50,
+                            direction: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取指定店铺下某客户最近的聊天消息（按时间升序返回）"""
+        with self.session_scope() as session:
+            query = session.query(MessageRecord).filter(
+                MessageRecord.shop_id == str(shop_id),
+                MessageRecord.from_uid == str(from_uid),
+            )
+            if direction:
+                query = query.filter(MessageRecord.direction == direction)
+            records = query.order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc()).limit(limit).all()
+            records = list(reversed(records))
+            return [
+                {
+                    'id': r.id,
+                    'channel': r.channel,
+                    'shop_id': r.shop_id,
+                    'account_id': r.account_id,
+                    'from_uid': r.from_uid,
+                    'nickname': r.nickname,
+                    'msg_id': r.msg_id,
+                    'direction': r.direction,
+                    'msg_type': r.msg_type,
+                    'content': r.content,
+                    'created_at': r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else None,
+                }
+                for r in records
+            ]
+
+    def count_messages(self, shop_id: str = None, from_uid: str = None) -> int:
+        """统计消息记录条数（可按店铺/客户过滤）"""
+        with self.session_scope() as session:
+            query = session.query(MessageRecord)
+            if shop_id:
+                query = query.filter(MessageRecord.shop_id == str(shop_id))
+            if from_uid:
+                query = query.filter(MessageRecord.from_uid == str(from_uid))
+            return query.count()
 
 _db_instance: Optional["DatabaseManager"] = None
 

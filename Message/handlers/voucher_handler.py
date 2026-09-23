@@ -852,9 +852,18 @@ class VoucherDetectionHandler(BaseHandler):
             success = isinstance(result, dict) and result.get("success", False)
             if success:
                 self.logger.info(f"[核销] 发送成功 from_uid={from_uid} text={text[:30]!r}")
+                self._record_outgoing(shop_id, user_id, from_uid, text)
             else:
                 self.logger.warning(f"[核销] 发送失败 from_uid={from_uid} result={result}")
             return success
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] 发送回复失败 from_uid={from_uid}: {e}")
             return False
+
+    def _record_outgoing(self, shop_id: str, user_id: str, from_uid: str, text: str) -> None:
+        """将核销等场景下客服发送的回复写入消息记录表"""
+        try:
+            from Message.core.persistence import save_outgoing_raw
+            save_outgoing_raw(shop_id=shop_id, user_id=user_id, from_uid=from_uid, content=text)
+        except Exception as e:
+            self.logger.warning(f"[核销] 记录客服回复失败 from_uid={from_uid}: {e}")

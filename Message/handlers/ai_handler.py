@@ -214,13 +214,42 @@ class AIReplyHandler(BaseHandler):
                 lambda: SendMessage(shop_id, user_id).send_text(from_uid, reply)
             )
             success = isinstance(result, dict) and result.get("success")
-            if not success:
+            if success:
+                self._record_outgoing(context, reply)
+                if context.type in (ContextType.IMAGE, ContextType.VIDEO):
+                    self._record_session_reply(context, reply)
+            else:
                 self.logger.warning(f"[AI] 发送失败 from_uid={from_uid} result={result}")
             return bool(success)
 
         except Exception as e:
             self.logger.error(f"发送回复失败: {e}")
             return False
+
+    def _record_outgoing(self, context: Context, content: str):
+        """记录 AI 客服回复内容到数据库（客服回复统一为文本消息）"""
+        try:
+            from Message.core.persistence import record_outgoing_message
+            record_outgoing_message(context, content, msg_type="text")
+        except Exception as e:
+            self.logger.debug(f"记录客服回复失败: {e}")
+
+    def _record_session_reply(self, context: Context, content: str):
+        """将图片/视频等未走 CustomerAgent 的固定回复写入 AI 会话历史"""
+        try:
+            from Message.core.persistence import record_agent_session_message
+            channel = getattr(context.channel_type, "value", None) or "pinduoduo"
+            from_uid = getattr(context.kwargs, "from_uid", None)
+            if not from_uid:
+                return
+            record_agent_session_message(
+                channel=channel,
+                customer_uid=str(from_uid),
+                role="assistant",
+                content=content,
+            )
+        except Exception as e:
+            self.logger.debug(f"记录固定回复会话历史失败: {e}")
 
     def _get_pending_voucher_hint(self, shop_id: Optional[str], from_uid: Optional[str]) -> str:
         """查询该用户是否有未完成的核销订单，返回引导缺少项的提示语"""

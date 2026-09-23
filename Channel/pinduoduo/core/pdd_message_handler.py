@@ -86,10 +86,14 @@ class MessageHandlerMixin:
                 return
 
             if context:
+                if context.type == ContextType.MALL_CS:
+                    if not self._try_handle_ai_control_command(context):
+                        self._record_mall_cs_message(context)
                 if self._should_process_immediately(context):
                     await self._handle_immediate_message(context, shop_id, user_id)
                     self.logger.debug(f"立即处理消息: {context.type}, ID: {pdd_message.msg_id}")
                 elif self._should_queue_message(context):
+                    self._record_incoming_message(context)
                     msg_id = await put_message(queue_name, context)
                     self.logger.debug(f"消息已入队: {queue_name}, ID: {msg_id}, 类型: {context.type}")
                 else:
@@ -127,6 +131,100 @@ class MessageHandlerMixin:
             ContextType.GOODS_SPEC,
         }
         return context.type in queue_types
+
+    def _record_incoming_message(self, context: Context):
+        """将客户发送的消息内容落库（只记录进入队列处理的消息）"""
+        try:
+            from Message.core.persistence import record_incoming_message
+            record_incoming_message(context)
+        except Exception as e:
+            self.logger.debug(f"记录客户消息失败: {e}")
+
+    def _record_mall_cs_message(self, context: Context):
+        """记录本店客服（mall_cs）发出的消息
+
+        PDD 消息中 mall_cs 的 from/to 与客户消息相反：from_uid 是本店客服账号，
+        to_uid 才是客户 UID。这里按客户 UID 归属，写入消息记录表并同步到 AI 会话历史，
+        让 AI 之后能知道人工已经回复过什么。
+        """
+        try:
+            kwargs = context.kwargs
+            channel = getattr(context.channel_type, "value", None) or "pinduoduo"
+            shop_id = getattr(kwargs, "shop_id", None)
+            user_id = getattr(kwargs, "user_id", None)
+            customer_uid = getattr(kwargs, "to_uid", None) or getattr(kwargs, "from_uid", None)
+            content = context.content or ""
+            if not customer_uid:
+                return
+
+            from Message.core.persistence import save_outgoing_raw, record_agent_session_message
+            save_outgoing_raw(
+                shop_id=shop_id,
+                user_id=user_id,
+                from_uid=str(customer_uid),
+                content=content,
+                msg_type="mall_cs",
+                channel=channel,
+            )
+            record_agent_session_message(
+                channel=channel,
+                customer_uid=str(customer_uid),
+                role="assistant",
+                content=content,
+            )
+        except Exception as e:
+            self.logger.debug(f"记录本店客服消息失败: {e}")
+
+    def _try_handle_ai_control_command(self, context: Context) -> bool:
+        """识别并执行客服发送的 STOP AI / START AI 控制命令（不区分大小写）
+
+        只针对「当前客户」：
+        - STOP AI  → 暂停该客户的自动回复，默认 3 分钟后自动恢复
+        - START AI → 立即恢复该客户的自动回复
+
+        命令必须由人工客服发出（MALL_CS），同账号下其他客户不受影响。
+        """
+        try:
+            import re
+            raw = str(context.content or "")
+            # 去掉空白与标点后再比对，兼容 "STOP AI" / "stop ai." / "STOPAI"
+            normalized = re.sub(r"[\s\W_]+", "", raw).upper()
+
+            if normalized not in ("STOPAI", "STARTAI"):
+                return False
+
+            kwargs = context.kwargs
+            channel = getattr(context.channel_type, "value", None) or "pinduoduo"
+            shop_id = getattr(kwargs, "shop_id", None)
+            user_id = getattr(kwargs, "user_id", None)
+            # mall_cs 消息的 from_uid 是客服账号，to_uid 才是客户
+            customer_uid = getattr(kwargs, "to_uid", None) or getattr(kwargs, "from_uid", None)
+            if not customer_uid:
+                self.logger.warning("[AI控制] 无法确定客户 UID，忽略控制命令")
+                return False
+
+            from Message.core.ai_pause import ai_pause_manager, DEFAULT_PAUSE_SECONDS
+            if normalized == "STARTAI":
+                ai_pause_manager.resume(channel, shop_id, user_id, customer_uid)
+                self.logger.info(f"[AI控制] 收到 START AI，客户 {customer_uid} 立即恢复自动回复")
+            else:
+                ai_pause_manager.pause(channel, shop_id, user_id, customer_uid, DEFAULT_PAUSE_SECONDS)
+                self.logger.info(f"[AI控制] 收到 STOP AI，客户 {customer_uid} 暂停自动回复 {DEFAULT_PAUSE_SECONDS}s")
+
+            # 记录控制命令到消息记录表（仅审计，不写入 AI 会话历史）
+            from Message.core.persistence import save_outgoing_raw
+            save_outgoing_raw(
+                shop_id=shop_id,
+                user_id=user_id,
+                from_uid=str(customer_uid),
+                content=raw,
+                msg_type="mall_cs_control",
+                channel=channel,
+            )
+            return True
+        except Exception as e:
+            self.logger.error(f"[AI控制] 处理控制命令失败: {e}")
+            return False
 
     async def _handle_immediate_message(self, context: Context, shop_id: str, user_id: str):
         """立即处理消息"""

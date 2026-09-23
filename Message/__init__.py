@@ -132,6 +132,22 @@ def handler_chain(use_ai=True, businessHours=None, bot=None):
     """简化版处理器链创建函数 - 包含关键词检测"""
     handlers = []
 
+    # 0. AI 回复总开关（全局配置开关）
+    try:
+        from .handlers.preprocessor import BusinessHoursHandler
+        handlers.append(BusinessHoursHandler())
+    except Exception as e:
+        from utils.logger_loguru import get_logger
+        get_logger("handler_chain").warning(f"AI回复开关处理器加载失败: {e}")
+
+    # 0.1 客户级暂停（客服发送 STOP AI 后该客户暂停 3 分钟）
+    try:
+        from .handlers.preprocessor import AIPauseHandler
+        handlers.append(AIPauseHandler())
+    except Exception as e:
+        from utils.logger_loguru import get_logger
+        get_logger("handler_chain").warning(f"AI暂停处理器加载失败: {e}")
+
     # 1. 核销自动检测（苹果序列号+拼多多卡券号双条件匹配）
     try:
         from .handlers.voucher_handler import VoucherDetectionHandler

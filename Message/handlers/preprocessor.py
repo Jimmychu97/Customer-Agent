@@ -31,6 +31,36 @@ class BusinessHoursHandler:
             return False
 
 
+class AIPauseHandler:
+    """客户级 AI 暂停处理器
+
+    客服在某个客户会话里发送 STOP AI 后，只暂停该客户的自动回复；
+    暂停到期（默认 3 分钟）自动恢复，或收到 START AI 立即恢复。
+    """
+
+    def can_handle(self, context: Context) -> bool:
+        return True
+
+    async def handle(self, context: Context, metadata: Dict[str, Any]) -> bool:
+        """True = 截断（该客户暂停中，不回复）；False = 放行"""
+        try:
+            from Message.core.ai_pause import ai_pause_manager
+
+            metadata = metadata or {}
+            channel = getattr(context.channel_type, "value", None) or str(context.channel_type or "")
+            shop_id = metadata.get("shop_id")
+            account_id = metadata.get("user_id")
+            customer_uid = metadata.get("from_uid")
+
+            if ai_pause_manager.is_paused(channel, shop_id, account_id, customer_uid):
+                logger.info(f"[AI暂停] 客户 {customer_uid} 暂停中，跳过自动回复")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[AI暂停] 检查异常: {e}")
+            return False
+
+
 class MessagePreprocessor:
     """消息预处理器 - 提取通用逻辑"""
 
