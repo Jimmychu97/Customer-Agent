@@ -144,18 +144,12 @@ class AIReplyHandler(BaseHandler):
                 handler = VoucherDetectionHandler()
                 pending = handler._get_pending_order_state(shop_id, from_uid)
 
-                if pending == "need_coupon":
-                    # 已有 sn，图片应该是卡券截图，只提取卡券号
-                    sn = None
-                    coupon = _extract_coupon(recognized_text)
-                elif pending == "need_sn":
-                    # 已有 coupon，图片应该是序列号/IMEI截图，只提取 sn
-                    sn = _extract_imei(recognized_text) or _extract_serial(recognized_text)
-                    coupon = None
-                else:
-                    # 无待核销订单，先尝试提取 sn/IMEI，提取到了就不再提取 coupon
-                    sn = _extract_imei(recognized_text) or _extract_serial(recognized_text)
-                    coupon = None if sn else _extract_coupon(recognized_text)
+                # 提取图片里的序列号/IMEI 与卡券号。
+                # 注意：不再根据待核销单的缺失项把另一个已识别到的值丢掉——
+                # 客户重复发送同一张卡券/序列号时，交由 VoucherDetectionHandler
+                # 按卡券号/序列号复用同一张单，避免重复建单与空参数核销。
+                sn = _extract_imei(recognized_text) or _extract_serial(recognized_text)
+                coupon = _extract_coupon(recognized_text, exclude_imei=sn)
 
                 self.logger.info(f"[图片识别] pending={pending!r} 提取结果 sn={sn!r} coupon={coupon!r}")
                 if sn or coupon:
@@ -168,8 +162,10 @@ class AIReplyHandler(BaseHandler):
                     )
                     # 传入已提取好的值，避免 handle 内部重新提取时误识别 IMEI2 等为卡券号
                     image_metadata = {**metadata, "_image_sn": sn, "_image_coupon": coupon}
-                    await handler.handle(voucher_context, image_metadata)
-                    return None  # 核销处理器已发送消息
+                    handled = await handler.handle(voucher_context, image_metadata)
+                    if handled:
+                        return None  # 核销处理器已发送消息
+                    self.logger.info("[图片识别] 核销处理器未接管，走普通AI回复")
                 self.logger.info("[图片识别] 未检测到核销信息，走普通AI回复")
 
             return recognized_text
@@ -259,13 +255,14 @@ class AIReplyHandler(BaseHandler):
             from database import db_manager
             from database.models import Order
             from datetime import datetime as dt, timedelta
-            ten_min_ago = dt.now() - timedelta(minutes=10)
+            from Message.handlers.voucher_handler import PENDING_WINDOW_MINUTES
+            since = dt.now() - timedelta(minutes=PENDING_WINDOW_MINUTES)
             with db_manager.session_scope() as session:
                 order = session.query(Order).filter(
                     Order.shop_id == shop_id,
                     Order.session_id == from_uid,
                     Order.status == 0,
-                    Order.created_at >= ten_min_ago,
+                    Order.created_at >= since,
                 ).order_by(Order.id.desc()).first()
                 if not order:
                     return ""

@@ -10,6 +10,7 @@ scripts/
 ├── build_exe.py          # 完整打包脚本（功能丰富）
 ├── build_win_exe.py      # 简化打包脚本（快速构建）
 ├── install_playwright.py # Playwright 浏览器安装脚本
+├── test_voucher_dedup.py # 核销流程防重复建单/防空参核销自测脚本
 ├── version_info.txt      # Windows 可执行文件版本信息
 └── README.md             # 本使用说明文档
 ```
@@ -152,7 +153,29 @@ python scripts/install_playwright.py
 
 ---
 
-### 4. version_info.txt - 版本信息配置
+### 4. test_voucher_dedup.py - 核销流程自测脚本
+
+**功能描述：**
+离线（不联网、使用临时 SQLite）验证核销流程：同一张卡券/同一个序列号重复提交不会重复建单，核销接口不会被空参数调用，失败时能区分是卡券问题还是序列号问题，图片识别路径与文本路径行为一致。
+
+**覆盖场景：**
+- 文本卡券 → 同卡券图片 → 序列号文本（只应产生 1 条订单、核销 1 次）
+- 重复发同卡券/同序列号、核销失败后重发、超过续接窗口后重发
+- 序列号/IMEI 纠正（文字与图片识别结果都算，沿用同一张单不新建单号）
+- 服务器日志回放（2026-09-23 真实客户序列：两个 IMEI、无效 15 位数字、卡券图片 OCR）
+- 提取逻辑样本：型号+序列号连写、关于本机 OCR、卡券截图 OCR
+
+**使用方法：**
+
+```bash
+PYTHONIOENCODING=utf-8 python scripts/test_voucher_dedup.py
+```
+
+输出 ASCII 摘要与 RESULT: pass=x fail=y，失败时退出码非 0。
+
+---
+
+### 5. version_info.txt - 版本信息配置
 
 **功能描述：**
 Windows 可执行文件的版本信息配置文件，用于 PyInstaller 打包。
