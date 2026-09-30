@@ -241,13 +241,27 @@ async def scenario_6(h: Harness):
 
 
 async def scenario_7(h: Harness):
-    print("S7 不同卡券 -> 各自建单")
+    print("S7 卡券号纠正 / 第二笔订单")
+    # 7a：同一张待核销单（还没有序列号）又发来另一张卡券 → 按"纠正"处理，仍是 1 条单
     h.reset("success")
     await h.send_text(COUPON)
     await h.send_text(COUPON2)
     rows = h.orders()
-    check("S7: 两张不同卡券 2 条单", len(rows) == 2, rows)
-    check("S7: 卡券分别落库", sorted(r[2] for r in rows) == sorted([COUPON, COUPON2]), rows)
+    check("S7a: 待核销单内改卡券不新建单", len(rows) == 1, rows)
+    check("S7a: 卡券号纠正为最新值", bool(rows) and rows[0][2] == COUPON2, rows)
+    check("S7a: 已告知客户改券", any("已更新您的卡券号" in t for t in h.sent), h.sent)
+
+    # 7b：上一单已核销成功后再来一张新卡券 → 属于第二笔，正常新建
+    h.reset("success")
+    await h.send_text(COUPON)
+    await h.send_text(SERIAL)
+    rows = h.orders()
+    check("S7b: 第一单已核销成功", len(rows) == 1 and rows[0][3] == 1, rows)
+    await h.send_text(COUPON2)
+    rows = h.orders()
+    check("S7b: 新卡券另建一单", len(rows) == 2, rows)
+    check("S7b: 成功单的卡券号未被改写",
+          len(rows) == 2 and rows[0][2] == COUPON and rows[1][2] == COUPON2, rows)
 
 
 async def scenario_8(db):
@@ -502,6 +516,270 @@ async def scenario_12(h: Harness):
     check("S12: 已成功单不新建单", len(rows) == 1, rows)
 
 
+async def scenario_13(h: Harness):
+    """卡券号打错后纠正（含已核销成功单的保护）"""
+    print("S13 卡券号纠正")
+    typo = COUPON[:-1]  # 少一位，仍是合法位数（11位）的卡券号
+    h.reset("fail_preview")   # 打错的券在拼多多侧验券失败
+    await h.send_text(SERIAL)
+    await h.send_text(typo)
+    rows = h.orders()
+    check("S13: 打错的卡券号先落库并核销失败",
+          len(rows) == 1 and rows[0][2] == typo and rows[0][1] == SERIAL and rows[0][3] == 2, rows)
+
+    h.verify_mode = "success"
+    await h.send_text(COUPON)  # 客户改对
+    rows = h.orders()
+    check("S13: 纠正不新建单", len(rows) == 1, rows)
+    check("S13: 卡券号已改为正确值", bool(rows) and rows[0][2] == COUPON, rows)
+    check("S13: 已告知客户改券", any("已更新您的卡券号" in t for t in h.sent), h.sent)
+    check("S13: 用纠正后的卡券号核销",
+          bool(h.verify_calls) and h.verify_calls[-1]["coupon"] == COUPON
+          and h.verify_calls[-1]["sn"] == SERIAL, h.verify_calls)
+    check("S13: 核销成功", bool(rows) and rows[0][3] == 1, rows)
+
+    # 已核销成功的单：带着同一序列号又发来别的卡券号 →
+    # 已成功单的凭据绝不被改写，但新券属于第二笔，必须另建一单并用新券核销
+    await h.send_text(f"{SERIAL} {COUPON2}")
+    rows = h.orders()
+    check("S13: 成功单凭据不被改写", bool(rows) and rows[0][2] == COUPON and rows[0][3] == 1, rows)
+    check("S13: 新券另建一单", len(rows) == 2 and rows[1][2] == COUPON2, rows)
+    check("S13: 新券用新券核销",
+          bool(h.verify_calls) and h.verify_calls[-1]["coupon"] == COUPON2, h.verify_calls)
+
+
+def scenario_14():
+    """卡券号格式与位数规则（沿用 git 历史约定）"""
+    from Message.handlers.voucher_handler import _extract_coupon, _extract_coupon_strict
+
+    print("S14 卡券号格式/位数规则")
+    check("S14: 9 位不提取", _extract_coupon("123456789") is None, _extract_coupon("123456789"))
+    check("S14: 10 位（下限）提取", _extract_coupon("1234567890") == "1234567890")
+    check("S14: 12 位提取", _extract_coupon("997001791266") == "997001791266")
+    check("S14: 14 位（上限）提取", _extract_coupon("12345678901234") == "12345678901234")
+    check("S14: 15 位按 IMEI 不提取", _extract_coupon("355549350251721") is None,
+          _extract_coupon("355549350251721"))
+    check("S14: 空格分组提取", _extract_coupon("9970 0179 1266") == "997001791266")
+    check("S14: 连字符分组提取", _extract_coupon("9970-0179-1266") == "997001791266")
+    check("S14: 手机号不提取", _extract_coupon("13676048541") is None)
+    check("S14: 订单号不提取", _extract_coupon("260922-544452154900751") is None,
+          _extract_coupon("260922-544452154900751"))
+    check("S14: 待补卡券严格模式认 13 位",
+          _extract_coupon_strict("1234567890123") == "1234567890123")
+    check("S14: 待补卡券严格模式不认 14 位",
+          _extract_coupon_strict("12345678901234") is None,
+          _extract_coupon_strict("12345678901234"))
+    check("S14: 严格模式下 IMEI 不提取", _extract_coupon_strict("355549350251721") is None)
+
+
+async def scenario_15(h: Harness):
+    """第一张券核销成功后再来第二张新券（同一台机器/同一序列号）——必须另建单并用新券核销
+
+    这是线上真实反馈的 BUG：旧逻辑在「序列号相同」时直接复用已核销成功的单，
+    把新卡券当成"误发"忽略掉，于是又拿旧券去核销 -> 券已使用 -> 客户看到"核销失败"。
+    """
+    from Message.handlers.ai_handler import AIReplyHandler
+
+    print("S15 已核销成功后再来第二张新卡券")
+
+    # 15a：同一序列号 + 新卡券（文本）
+    h.reset("success")
+    await h.send_text("序列号 %s 卡券 %s" % (SERIAL, COUPON))
+    rows = h.orders()
+    check("S15a: 第一单核销成功", len(rows) == 1 and rows[0][3] == 1 and rows[0][2] == COUPON, rows)
+
+    h.verify_calls.clear()
+    await h.send_text("序列号 %s 卡券 %s" % (SERIAL, COUPON2))
+    rows = h.orders()
+    check("S15a: 新卡券另建一单（共 2 单）", len(rows) == 2, rows)
+    check("S15a: 第二单卡券号是新券", len(rows) == 2 and rows[1][2] == COUPON2, rows)
+    check("S15a: 核销用的是新券而不是旧券",
+          len(h.verify_calls) == 1 and h.verify_calls[-1]["coupon"] == COUPON2, h.verify_calls)
+    check("S15a: 第一单凭据未被改写",
+          len(rows) == 2 and rows[0][2] == COUPON and rows[0][3] == 1, rows)
+
+    # 15b：只发新卡券（无序列号）
+    h.reset("success")
+    await h.send_text("序列号 %s 卡券 %s" % (SERIAL, COUPON))
+    h.verify_calls.clear()
+    await h.send_text(COUPON2)
+    rows = h.orders()
+    check("S15b: 只发新券也另建一单", len(rows) == 2, rows)
+    check("S15b: 新券暂不核销（还缺序列号）", len(h.verify_calls) == 0, h.verify_calls)
+    check("S15b: 提示补序列号", "请继续提供" in (h.sent[-1] or ""), h.sent[-1:])
+
+    # 15c：新卡券 + 新序列号
+    h.reset("success")
+    await h.send_text("序列号 %s 卡券 %s" % (SERIAL, COUPON))
+    h.verify_calls.clear()
+    await h.send_text("序列号 %s 卡券 %s" % (SERIAL2, COUPON2))
+    rows = h.orders()
+    check("S15c: 新券+新序列号另建一单", len(rows) == 2, rows)
+    check("S15c: 核销用的是新券",
+          len(h.verify_calls) == 1 and h.verify_calls[-1]["coupon"] == COUPON2, h.verify_calls)
+
+    # 15d：重复提交同一张已核销成功的券 → 不新建单、状态与凭据保持不变
+    h.reset("success")
+    await h.send_text("序列号 %s 卡券 %s" % (SERIAL, COUPON))
+    await h.send_text("序列号 %s 卡券 %s" % (SERIAL, COUPON))
+    rows = h.orders()
+    check("S15d: 重复提交同券不新建单", len(rows) == 1, rows)
+    check("S15d: 成功状态与凭据保持不变",
+          len(rows) == 1 and rows[0][3] == 1 and rows[0][2] == COUPON, rows)
+
+    # 15e：第二张新券是图片（OCR 出同一序列号 + 新卡券）
+    h.reset("success")
+    await h.send_text("序列号 %s 卡券 %s" % (SERIAL, COUPON))
+    h.verify_calls.clear()
+    with _ClassPatch(h):
+        ai = AIReplyHandler(bot=_FakeBot("序列号 %s 卡券 %s" % (SERIAL, COUPON2)))
+        await ai._get_ai_reply_with_image(
+            "http://img", make_context("", ContextType.IMAGE), dict(META)
+        )
+    rows = h.orders()
+    check("S15e: 图片新券另建一单", len(rows) == 2, rows)
+    check("S15e: 图片新券核销用的是新券",
+          len(h.verify_calls) == 1 and h.verify_calls[-1]["coupon"] == COUPON2, h.verify_calls)
+
+    h.assert_no_empty_verify("S15")
+
+
+async def scenario_16(db):
+    """已核销成功的券重复提交：不再重复调用核销接口，也不误报核销失败"""
+    from Message.handlers.voucher_handler import VoucherDetectionHandler
+    from Message.handlers.voucher_handler import _VOUCHER_SUCCESS
+    from database.models import Order as _Order
+
+    print("S16 已核销成功的券重复提交")
+    handler = VoucherDetectionHandler()
+    handler._record_message = lambda *a, **k: None
+    calls = {"n": 0}
+
+    def fake_query_and_verify(*a, **k):
+        calls["n"] += 1
+        return "核销成功！", None
+
+    handler._query_and_verify = fake_query_and_verify
+
+    with db.session_scope() as session:
+        session.query(_Order).delete()
+        order = _Order(shop_id=SHOP_ID, session_id=CUST_UID,
+                       sn_imei=SERIAL, coupons=COUPON, status=1)
+        session.add(order)
+        session.flush()
+        order_id = order.id
+
+    reply, status = await handler._do_verify(SERIAL, COUPON, SHOP_ID, USER_ID, CUST_UID, order_id)
+    check("S16: 已核销成功的券不再调用核销接口", calls["n"] == 0, calls)
+    check("S16: 回复明确已核销成功（不是核销失败）",
+          bool(reply) and "已核销成功" in reply and "失败" not in reply, reply)
+    check("S16: 状态标记为成功", status == _VOUCHER_SUCCESS, status)
+
+
+async def scenario_17(h: Harness):
+    """旧单还没核销成功（待核销/失败）时，同一序列号改发新券——按纠正处理，但绝不能拿旧券核销"""
+    print("S17 旧单未成功时同序列号改发新券")
+    h.reset("fail_preview")                     # 第一张券验券失败 -> status=2
+    await h.send_text("序列号 %s 卡券 %s" % (SERIAL, COUPON))
+    rows = h.orders()
+    check("S17a: 首单核销失败", len(rows) == 1 and rows[0][3] == 2, rows)
+
+    h.verify_mode = "success"
+    h.verify_calls.clear()
+    await h.send_text("序列号 %s 卡券 %s" % (SERIAL, COUPON2))
+    rows = h.orders()
+    check("S17a: 纠正不新建单", len(rows) == 1, rows)
+    check("S17a: 卡券号改为新券", bool(rows) and rows[0][2] == COUPON2, rows)
+    check("S17a: 核销用新券（不是旧券）",
+          len(h.verify_calls) == 1 and h.verify_calls[-1]["coupon"] == COUPON2, h.verify_calls)
+    check("S17a: 核销成功", bool(rows) and rows[0][3] == 1, rows)
+
+    # 17b: 第一张券还在待核销（只有券、缺序列号）→ 又来一张新券 → 仍按纠正，补序列号后用新券核销
+    h.reset("success")
+    await h.send_text(COUPON)
+    await h.send_text(COUPON2)
+    rows = h.orders()
+    check("S17b: 仍 1 条单", len(rows) == 1, rows)
+    check("S17b: 卡券号是最后一张", bool(rows) and rows[0][2] == COUPON2, rows)
+    h.verify_calls.clear()
+    await h.send_text(SERIAL)
+    rows = h.orders()
+    check("S17b: 用最后一张券核销",
+          len(h.verify_calls) == 1 and h.verify_calls[-1]["coupon"] == COUPON2, h.verify_calls)
+    check("S17b: 核销成功", bool(rows) and rows[0][3] == 1, rows)
+    h.assert_no_empty_verify("S17")
+
+
+async def scenario_18(db):
+    """同一序列号 + 不同卡券，端到端回归（券只能用一次，模拟拼多多侧真实返回）
+
+    线上 BUG 的完整复现路径：第一次券核销成功后，同一个序列号再发新券，
+    旧逻辑把新券当误发忽略、又拿旧券去核销 -> 接口返回"该券已被核销" -> 客户看到核销失败。
+    """
+    from Message.handlers.voucher_handler import VoucherDetectionHandler
+
+    print("S18 同一序列号 + 不同卡券（券只能用一次，端到端）")
+    handler = VoucherDetectionHandler()
+    handler._record_message = lambda *a, **k: None
+    sent, used, calls = [], set(), []
+
+    async def fake_send(shop_id, user_id, from_uid, text):
+        sent.append(text)
+        return True
+
+    def fake_api(serial, voucher_code, shop_id, user_id, from_uid, order_id):
+        calls.append({"sn": serial, "coupon": voucher_code})
+        if voucher_code in used:          # 拼多多侧：券已被核销
+            handler._update_order_status(order_id, 2)
+            return f"❌ 卡券核销失败：该券已被核销\n卡券号：{voucher_code}", None
+        used.add(voucher_code)
+        handler._update_order_status(order_id, 1)
+        return "核销成功！", None
+
+    handler._send = fake_send
+    handler._query_and_verify = fake_api
+
+    async def send(text):
+        sent.clear()
+        await handler.handle(make_context(text), dict(META))
+
+    with db.session_scope() as s:
+        s.query(Order).delete()
+
+    await send("序列号 %s 卡券 %s" % (SERIAL, COUPON))
+    rows = _all_orders(db)
+    check("S18: 第一张券核销成功",
+          len(rows) == 1 and rows[0][2] == COUPON and rows[0][3] == 1, rows)
+    check("S18: 第一次调用接口用第 1 张券",
+          [c["coupon"] for c in calls] == [COUPON], calls)
+
+    await send("序列号 %s 卡券 %s" % (SERIAL, COUPON2))
+    rows = _all_orders(db)
+    check("S18: 同一序列号换新券 -> 另建一单", len(rows) == 2, rows)
+    check("S18: 第二单用新券且核销成功",
+          len(rows) == 2 and rows[1][2] == COUPON2 and rows[1][3] == 1, rows)
+    check("S18: 第二次调用接口用的是新券",
+          [c["coupon"] for c in calls] == [COUPON, COUPON2], calls)
+    check("S18: 客户收到核销成功（不是核销失败）",
+          bool(sent) and "核销成功" in sent[-1] and "失败" not in sent[-1], sent[-1:])
+    check("S18: 第一单凭据未被改写",
+          rows[0][2] == COUPON and rows[0][3] == 1, rows)
+
+    # 再重复提交同一张已成功的券 -> 不应再打接口，也不应报失败
+    await send("序列号 %s 卡券 %s" % (SERIAL, COUPON2))
+    rows = _all_orders(db)
+    check("S18: 重复提交已成功的券不再调用接口", len(calls) == 2, calls)
+    check("S18: 重复提交回复已核销成功",
+          bool(sent) and "已核销成功" in sent[-1] and "失败" not in sent[-1], sent[-1:])
+    check("S18: 订单未被改成核销失败", all(r[3] != 2 for r in rows), rows)
+
+
+def _all_orders(db):
+    with db.session_scope() as s:
+        return [(o.id, o.sn_imei or "", o.coupons or "", o.status)
+                for o in s.query(Order).order_by(Order.id).all()]
+
+
 async def main():
     db, tmpdir = make_tmp_db()
     try:
@@ -517,7 +795,13 @@ async def main():
         await scenario_9(h)
         await scenario_10(h)
         await scenario_12(h)
+        await scenario_13(h)
+        await scenario_15(h)
+        await scenario_16(db)
+        await scenario_17(h)
+        await scenario_18(db)
         scenario_11()
+        scenario_14()
     finally:
         try:
             db.engine.dispose()

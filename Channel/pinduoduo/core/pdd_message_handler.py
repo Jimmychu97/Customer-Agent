@@ -136,7 +136,14 @@ class MessageHandlerMixin:
         """将客户发送的消息内容落库（只记录进入队列处理的消息）"""
         try:
             from Message.core.persistence import record_incoming_message
-            record_incoming_message(context)
+            ok = record_incoming_message(context)
+            kwargs = context.kwargs
+            customer_uid = getattr(kwargs, "from_uid", None)
+            msg_id = getattr(kwargs, "msg_id", None)
+            if ok:
+                self.logger.info(f"[消息记录] 客户消息已记录 customer={customer_uid} msg_id={msg_id}")
+            else:
+                self.logger.warning(f"[消息记录] 客户消息落库失败 customer={customer_uid} msg_id={msg_id}")
         except Exception as e:
             self.logger.debug(f"记录客户消息失败: {e}")
 
@@ -152,26 +159,56 @@ class MessageHandlerMixin:
             channel = getattr(context.channel_type, "value", None) or "pinduoduo"
             shop_id = getattr(kwargs, "shop_id", None)
             user_id = getattr(kwargs, "user_id", None)
-            customer_uid = getattr(kwargs, "to_uid", None) or getattr(kwargs, "from_uid", None)
+            to_uid = getattr(kwargs, "to_uid", None)
+            customer_uid = to_uid or getattr(kwargs, "from_uid", None)
             content = context.content or ""
+            msg_id = getattr(kwargs, "msg_id", None)
+            if not to_uid and customer_uid:
+                # mall_cs 消息的 from_uid 是本店客服账号，正常归属应取 to_uid；
+                # 缺失时只能退回 from_uid，可能出现归属错误，这里明确告警。
+                self.logger.warning(
+                    f"[消息记录] 人工客服消息缺少 to_uid，退回归属到 from_uid={customer_uid}"
+                    "（该值可能是客服账号而非客户，请核查）"
+                )
             if not customer_uid:
+                self.logger.warning(
+                    f"[消息记录] 人工客服消息缺少客户 UID，无法归属 msg_id={msg_id} "
+                    f"content={str(content)[:20]!r}"
+                )
                 return
 
-            from Message.core.persistence import save_outgoing_raw, record_agent_session_message
-            save_outgoing_raw(
+            from Message.core.persistence import (
+                save_outgoing_raw,
+                record_agent_session_message,
+                SOURCE_MALL_CS,
+            )
+            saved = save_outgoing_raw(
                 shop_id=shop_id,
                 user_id=user_id,
                 from_uid=str(customer_uid),
                 content=content,
                 msg_type="mall_cs",
                 channel=channel,
+                msg_id=msg_id,
             )
-            record_agent_session_message(
+            session_ok = record_agent_session_message(
                 channel=channel,
                 customer_uid=str(customer_uid),
                 role="assistant",
                 content=content,
+                source=SOURCE_MALL_CS,
             )
+            text = content if isinstance(content, str) else str(content)
+            if saved:
+                self.logger.info(
+                    f"[消息记录] 人工客服消息已记录 customer={customer_uid} msg_id={msg_id} "
+                    f"len={len(text)} 会话历史={'ok' if session_ok else 'failed'}"
+                )
+            else:
+                self.logger.warning(
+                    f"[消息记录] 人工客服消息落库失败 customer={customer_uid} msg_id={msg_id} "
+                    f"会话历史={'ok' if session_ok else 'failed'}"
+                )
         except Exception as e:
             self.logger.debug(f"记录本店客服消息失败: {e}")
 

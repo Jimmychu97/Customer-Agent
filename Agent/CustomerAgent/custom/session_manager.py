@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Literal
 
 from sqlalchemy import (
@@ -51,6 +51,9 @@ class AgentMessage(Base):
     role = Column(String(32), nullable=False)  # system | user | assistant | tool
     content = Column(Text, nullable=True)
     tool_call_id = Column(String(128), nullable=True)  # 关联 LLM 请求中的 tool_call id
+    # 来源标记：customer-客户 / ai-AI自动回复 / mall_cs-人工客服 / voucher-核销 / control-控制命令 / system-系统
+    # role 只有 user/assistant（LLM 需要），来源必须靠这一列区分
+    source = Column(String(20), nullable=True, index=True)
     timestamp = Column(DateTime, default=datetime.now, nullable=False)
 
     __table_args__ = (
@@ -72,6 +75,7 @@ class AgentMessage(Base):
             "role": self.role,
             "content": content,
             "tool_call_id": self.tool_call_id,
+            "source": self.source,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
 
@@ -172,6 +176,7 @@ class SessionManager:
         self.engine = create_engine(f"sqlite:///{db_path}")
         self._Session = sessionmaker(bind=self.engine)
         Base.metadata.create_all(self.engine)
+        self._migrate_add_source_column()
 
         self._token_estimator = TokenEstimator(model_name=model_name)
         logger.info(
@@ -179,8 +184,35 @@ class SessionManager:
             f"threshold={self.threshold}, retain={retain_count}"
         )
 
+    def _migrate_add_source_column(self) -> None:
+        """为旧库的 agent_messages 表补充 source 列（幂等）"""
+        try:
+            from sqlalchemy import text as _sql_text
+            with self.engine.connect() as conn:
+                cols = [row[1] for row in conn.execute(_sql_text("PRAGMA table_info(agent_messages)"))]
+                if cols and "source" not in cols:
+                    conn.execute(_sql_text("ALTER TABLE agent_messages ADD COLUMN source VARCHAR(20)"))
+                    conn.commit()
+                    logger.info("agent_messages 已补充 source 列（来源标记：customer/ai/mall_cs/...）")
+        except Exception as e:
+            logger.warning(f"agent_messages 迁移 source 列失败: {e}")
+
     def _session(self):
         return self._Session()
+
+    def _is_duplicate_message(self, session, session_id: str, role: str, content, seconds: int) -> bool:
+        """同会话 + 同角色 + 同内容，且在 seconds 秒内重复出现过 -> 视为重复"""
+        try:
+            since = datetime.now() - timedelta(seconds=int(seconds))
+            return session.query(AgentMessage.id).filter(
+                AgentMessage.session_id == session_id,
+                AgentMessage.role == role,
+                AgentMessage.content == content,
+                AgentMessage.timestamp >= since,
+            ).first() is not None
+        except Exception as e:
+            logger.debug(f"会话历史去重检查失败: {e}")
+            return False
 
     def add_message(
         self,
@@ -188,17 +220,30 @@ class SessionManager:
         role: str,
         content,
         tool_call_id: Optional[str] = None,
+        source: Optional[str] = None,
+        dedup_seconds: int = 0,
     ) -> bool:
-        """追加消息到会话历史"""
+        """追加消息到会话历史
+
+        source: 来源标记（customer/ai/mall_cs/voucher/control/system），便于区分人工与 AI
+        dedup_seconds: > 0 时，同会话 + 同角色 + 同内容在该秒数内重复写入会被跳过
+        """
         session = self._session()
         try:
             if isinstance(content, (list, dict)):
                 content = json.dumps(content, ensure_ascii=False)
+            if dedup_seconds and self._is_duplicate_message(session, session_id, role, content, dedup_seconds):
+                logger.info(
+                    f"[消息记录] 会话历史重复写入已跳过 session={session_id} "
+                    f"role={role} source={source}"
+                )
+                return True
             msg = AgentMessage(
                 session_id=session_id,
                 role=role,
                 content=content,
                 tool_call_id=tool_call_id,
+                source=source,
                 timestamp=datetime.now(),
             )
             session.add(msg)

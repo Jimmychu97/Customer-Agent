@@ -224,6 +224,7 @@ class CustomerAgent(Bot):
                 session_id=session_id,
                 role="user",
                 content=query,
+                source="customer",
             )
 
             # 构建 messages
@@ -237,6 +238,7 @@ class CustomerAgent(Bot):
                 session_id=session_id,
                 role="assistant",
                 content=final_content,
+                source="ai",
             )
 
             return Reply(ReplyType.TEXT, final_content or "抱歉，我暂时无法回复。")

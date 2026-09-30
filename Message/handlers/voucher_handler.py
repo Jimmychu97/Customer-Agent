@@ -90,6 +90,15 @@ def _is_phone(candidate: str) -> bool:
     return False
 
 
+# 卡券号位数规则（与仓库历史实现保持一致，勿随意改动）
+# - 拼多多卡券号：10-14 位纯数字，支持空格/连字符分组格式，排除手机号
+# - 15 位数字一律按 IMEI/订单号处理
+# - "待补卡券"的严格模式更保守：只认 10-13 位，且排除 14 位以上长数字串的子串
+_COUPON_MIN_DIGITS = 10
+_COUPON_MAX_DIGITS = 14
+_COUPON_STRICT_MAX_DIGITS = 13
+
+
 def _has_imei_label(text: str, start: int) -> bool:
     """数字串前面一小段里是否带 IMEI/MEID 标签（文本和 OCR 里的常见写法）"""
     prefix = text[max(0, start - 12):start].upper()
@@ -99,20 +108,27 @@ def _has_imei_label(text: str, start: int) -> bool:
 def _extract_coupon(text: str, exclude_imei: str = None) -> Optional[str]:
     """提取拼多多卡券号（10-14位纯数字，支持空格/连字符分组格式，排除手机号）
 
+    位数规则沿用仓库历史实现（git log -p -- Message/handlers/voucher_handler.py
+    自 first commit 起即为"10-14位纯数字"、"排除15位IMEI"）：
+    - 卡券号：_COUPON_MIN_DIGITS ~ _COUPON_MAX_DIGITS 位
+    - 15 位数字串一律按 IMEI 处理，绝不截尾当卡券号
     优先匹配带分隔符的分组格式（更可信），再匹配纯连续数字。
-    对于超长连续数字串，尝试从右截取标准长度（12位优先）。
+    对于超长连续数字串（16-18位），尝试从右截取标准长度（12位优先）。
     exclude_imei: 已提取的IMEI，避免将其子串误识别为卡券号
     """
     # 第一轮：必须含空格或连字符分隔的分组格式（高可信度），不跨行
     for m in re.finditer(r'(?<!\d)(\d+(?:[ \t\-]+\d+)+)(?!\d)', text):
         candidate = _normalize_number(m.group(1))
-        if candidate.isdigit() and 10 <= len(candidate) <= 14 and not _is_phone(candidate):
+        if (candidate.isdigit() and not _is_phone(candidate)
+                and _COUPON_MIN_DIGITS <= len(candidate) <= _COUPON_MAX_DIGITS):
             if exclude_imei and (candidate in exclude_imei or exclude_imei in candidate):
                 continue
             return candidate
 
     # 第二轮：纯连续数字，精确匹配 10-14 位
-    for m in re.finditer(r'(?<!\d)(\d{10,14})(?!\d)', text):
+    for m in re.finditer(
+        rf'(?<!\d)(\d{{{_COUPON_MIN_DIGITS},{_COUPON_MAX_DIGITS}}})(?!\d)', text
+    ):
         candidate = m.group(1)
         if not _is_phone(candidate):
             if exclude_imei and (candidate in exclude_imei or exclude_imei in candidate):
@@ -143,14 +159,20 @@ def _extract_coupon(text: str, exclude_imei: str = None) -> Optional[str]:
 def _extract_coupon_strict(text: str, exclude_imei: Optional[str] = None) -> Optional[str]:
     """严格卡券号提取（已有序列号待补卡券时使用）
 
-    只认 10-13 位、排除手机号、排除超长数字串（IMEI/订单号）的子串，
+    只认 10-13 位（_COUPON_STRICT_MAX_DIGITS）、排除手机号、
+    排除 14 位以上长数字串（IMEI/订单号）的子串，
     避免把序列号或订单号误判成卡券号。
     """
-    long_numbers = re.findall(r'(?<!\d)(\d{14,})(?!\d)', text)
-    for m in re.finditer(r'(?<!\d)(\d+(?:[ \t\-]+\d+)+|\d{10,13})(?!\d)', text):
+    long_numbers = re.findall(rf'(?<!\d)(\d{{{_COUPON_STRICT_MAX_DIGITS + 1},}})(?!\d)', text)
+    for m in re.finditer(
+        rf'(?<!\d)(\d+(?:[ \t\-]+\d+)+|\d{{{_COUPON_MIN_DIGITS},{_COUPON_STRICT_MAX_DIGITS}}})(?!\d)',
+        text,
+    ):
         raw = m.group(1)
         candidate = _normalize_number(raw) if (' ' in raw or '-' in raw) else raw
-        if not candidate.isdigit() or not (10 <= len(candidate) <= 13):
+        if not candidate.isdigit() or not (
+            _COUPON_MIN_DIGITS <= len(candidate) <= _COUPON_STRICT_MAX_DIGITS
+        ):
             continue
         if _is_phone(candidate):
             continue
@@ -435,9 +457,11 @@ class VoucherDetectionHandler(BaseHandler):
 
         1. 卡券号精确匹配（不限时间）：同一张券永远复用同一行，不新建单号
         2. 序列号/IMEI 精确匹配（不限时间）：同一个序列号不新建单号
-        3. 窗口内最新的待核销单，且本条消息补齐它缺的那一项；
-           若该单已有序列号但本条消息给的是**不同的序列号/IMEI**，视为纠正，
-           复用同一行并改写（文本和图片识别结果一视同仁，图片里同样是序列号/IMEI）
+        3. 窗口内最新的待核销单（status=0），且本条消息补齐它缺的那一项；
+           若该单已有该项但本条消息给的是**不同的有效值**，视为纠正，复用同一行并改写：
+           - 序列号/IMEI：文本和图片识别结果一视同仁（图片里同样是序列号/IMEI）
+           - 卡券号：只认合法位数的卡券号（10-14位，见 _COUPON_* 常量），
+             已核销成功（status=1）的单永不改写
         """
         from datetime import datetime as dt, timedelta
 
@@ -454,11 +478,17 @@ class VoucherDetectionHandler(BaseHandler):
         if sn:
             found = base.filter(order_model.sn_imei == sn).order_by(order_model.id.desc()).first()
             if found is not None:
-                return found
+                # 同一台机器可以有多笔核销业务（第二张券 / 第二次下单）。
+                # 只有本条消息没有带来"不同的卡券号"时才复用这一行；
+                # 否则继续往下走：待核销/失败的单按"纠正"复用，已核销成功的单必须另建新单，
+                # 绝不能拿旧券去重复核销（旧券已被使用，接口会返回核销失败）。
+                if not coupon_no or not found.coupons or found.coupons == coupon_no:
+                    return found
 
         since = dt.now() - timedelta(minutes=PENDING_WINDOW_MINUTES)
+        # 待核销(0) 和 核销失败(2) 的单都可以被纠正；已核销成功(1) 的单是最终凭据，永不改写
         candidate = base.filter(
-            order_model.status == 0,
+            order_model.status != 1,
             order_model.created_at >= since,
         ).order_by(order_model.id.desc()).first()
         if candidate is None:
@@ -466,9 +496,19 @@ class VoucherDetectionHandler(BaseHandler):
 
         need_sn = bool(candidate.coupons) and not candidate.sn_imei
         need_coupon = bool(candidate.sn_imei) and not candidate.coupons
-        # 补齐缺失项，或给出不同的序列号/IMEI（客户纠正）→ 都用这一行，不新建单号
-        sn_usable = bool(sn) and (need_sn or (candidate.sn_imei and candidate.sn_imei != sn))
-        if sn_usable or (coupon_no and need_coupon):
+        # 消息同时给出"另一个序列号 + 另一张卡券号"= 新的一笔业务，另建单，不做纠正
+        if (sn and coupon_no and candidate.sn_imei and candidate.coupons
+                and candidate.sn_imei != sn and candidate.coupons != coupon_no):
+            return None
+
+        # 补齐缺失项，或给出不同的有效值（客户纠正）→ 都用这一行，不新建单号
+        sn_usable = bool(sn) and (
+            need_sn or (candidate.sn_imei and candidate.sn_imei != sn)
+        )
+        coupon_usable = bool(coupon_no) and (
+            need_coupon or (candidate.coupons and candidate.coupons != coupon_no)
+        )
+        if sn_usable or coupon_usable:
             return candidate
         return None
 
@@ -525,8 +565,24 @@ class VoucherDetectionHandler(BaseHandler):
                                     )
                                     order.sn_imei = sn
                                     updates.append(f"✅ 已更新您的序列号/IMEI：{sn}")
-                        if coupon_no and not order.coupons:
-                            order.coupons = coupon_no
+                        if coupon_no:
+                            if not order.coupons:
+                                order.coupons = coupon_no
+                            elif order.coupons != coupon_no:
+                                if order.status == 1:
+                                    # 已核销成功 = 最终凭据（券已被这张单核销掉），不允许再改写
+                                    self.logger.info(
+                                        f"[核销] Order id={order.id} 已核销成功，保留原卡券号 "
+                                        f"{order.coupons!r}，忽略本条 {coupon_no!r}"
+                                    )
+                                else:
+                                    # 客户重新提供了卡券号（打错后纠正 / 重新复制卡券）
+                                    self.logger.info(
+                                        f"[核销] 纠正 Order id={order.id} coupon: "
+                                        f"{order.coupons!r} -> {coupon_no!r}"
+                                    )
+                                    order.coupons = coupon_no
+                                    updates.append(f"✅ 已更新您的卡券号：{coupon_no}")
                         session.flush()
                         self.logger.info(
                             f"[核销] 复用 Order id={order.id} status={order.status} "
@@ -540,12 +596,15 @@ class VoucherDetectionHandler(BaseHandler):
                 return "", "", None, []
 
     def _get_pending_order_state(self, shop_id: str, from_uid: str) -> Optional[str]:
-        """查询待核销订单的缺失项
+        """查询当前可续接/可纠正订单的缺失项
 
         Returns:
             'need_sn'     - 已有 coupon 缺 sn
             'need_coupon' - 已有 sn 缺 coupon
-            None          - 无待核销订单
+            None          - 没有可续接的单（没有待核销单，或单已完整）
+
+        统计范围与 _select_order 一致：待核销(0) + 核销失败(2) 的单都算，
+        已核销成功(1) 的单是最终凭据，不再续接。
         """
         if not shop_id or not from_uid:
             return None
@@ -558,7 +617,7 @@ class VoucherDetectionHandler(BaseHandler):
                 order = session.query(Order).filter(
                     Order.shop_id == shop_id,
                     Order.session_id == from_uid,
-                    Order.status == 0,
+                    Order.status != 1,
                     Order.created_at >= since,
                 ).order_by(Order.id.desc()).first()
                 if not order:
@@ -571,6 +630,24 @@ class VoucherDetectionHandler(BaseHandler):
         except Exception as e:
             self.logger.warning(f"[核销] 查询待核销订单失败: {e}")
             return None
+
+    def _already_verified(self, order_id: Optional[int], coupon_no: str) -> bool:
+        """该单是否"已核销成功，且卡券号与本次一致"
+
+        客户把同一张已核销成功的券再发一次时，不要重复调用验券接口
+        （接口会返回"已核销"错误，容易被误报成"核销失败"）。
+        """
+        if not order_id or not coupon_no:
+            return False
+        try:
+            from database import db_manager
+            from database.models import Order
+            with db_manager.session_scope() as session:
+                order = session.query(Order).filter(Order.id == order_id).first()
+                return bool(order and order.status == 1 and order.coupons == coupon_no)
+        except Exception as e:
+            self.logger.debug(f"[核销] 查询已核销状态失败 order_id={order_id}: {e}")
+            return False
 
     async def _do_verify(
         self,
@@ -588,6 +665,12 @@ class VoucherDetectionHandler(BaseHandler):
                 f"[核销] 参数不完整 sn={sn!r} coupon={coupon_no!r} order_id={order_id}，跳过核销调用"
             )
             return "", _VOUCHER_ERROR
+        # 该券已经核销成功 → 直接告知，不再打接口（避免"已核销"错误被误报成核销失败）
+        if self._already_verified(order_id, coupon_no):
+            self.logger.info(
+                f"[核销] 卡券已核销成功，跳过重复核销调用 order_id={order_id} coupon={coupon_no}"
+            )
+            return f"✅ 该卡券已核销成功，无需重复核销\n卡券号：{coupon_no}", _VOUCHER_SUCCESS
         self.logger.info(f"[核销] 双条件齐备，触发核销 order_id={order_id}")
         result_text, gsx_params = await asyncio.to_thread(
             self._query_and_verify,
@@ -1016,7 +1099,11 @@ class VoucherDetectionHandler(BaseHandler):
             self.logger.opt(exception=True).error(f"[核销] 更新 Order 状态失败 order_id={order_id}: {e}")
 
     def _record_message(self, session_id: str, role: str, content: str) -> None:
-        """将消息写入 agent_messages 会话历史"""
+        """将消息写入 agent_messages 会话历史
+
+        source 标记来源：客户消息记 customer，核销流程发出的话记 voucher，
+        便于在库里区分"人工客服"与"程序/AI 发出"的内容。
+        """
         try:
             from Agent.CustomerAgent.custom.agent_config import AgentConfig
             from Agent.CustomerAgent.custom.session_manager import SessionManager
@@ -1027,7 +1114,12 @@ class VoucherDetectionHandler(BaseHandler):
                 compress_ratio=agent_config.compress_ratio,
                 retain_count=agent_config.retain_count,
                 model_name=agent_config.model_name,
-            ).add_message(session_id=session_id, role=role, content=content)
+            ).add_message(
+                session_id=session_id,
+                role=role,
+                content=content,
+                source="customer" if role == "user" else "voucher",
+            )
         except Exception as e:
             self.logger.warning(f"[核销] 写入会话历史失败: {e}")
 

@@ -248,7 +248,11 @@ class AIReplyHandler(BaseHandler):
             self.logger.debug(f"记录固定回复会话历史失败: {e}")
 
     def _get_pending_voucher_hint(self, shop_id: Optional[str], from_uid: Optional[str]) -> str:
-        """查询该用户是否有未完成的核销订单，返回引导缺少项的提示语"""
+        """查询该用户是否有未完成的核销订单，返回引导缺少项的提示语
+
+        统计范围与 VoucherDetectionHandler._select_order 一致：
+        待核销(0) + 核销失败(2) 的单都算（都可以继续补/纠正），已核销成功(1) 的不算。
+        """
         if not shop_id or not from_uid:
             return ""
         try:
@@ -261,7 +265,7 @@ class AIReplyHandler(BaseHandler):
                 order = session.query(Order).filter(
                     Order.shop_id == shop_id,
                     Order.session_id == from_uid,
-                    Order.status == 0,
+                    Order.status != 1,
                     Order.created_at >= since,
                 ).order_by(Order.id.desc()).first()
                 if not order:
