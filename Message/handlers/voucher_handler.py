@@ -456,8 +456,12 @@ class VoucherDetectionHandler(BaseHandler):
         """在同一 session 内按优先级选出本条消息应归属的订单
 
         1. 卡券号精确匹配（不限时间）：同一张券永远复用同一行，不新建单号
-        2. 序列号/IMEI 精确匹配（不限时间）：同一个序列号不新建单号
-        3. 窗口内最新的待核销单（status=0），且本条消息补齐它缺的那一项；
+        2. 本条只给序列号时：优先补齐"窗口内待补序列号"的待核销单
+           （客户先发新券、再补序列号是常见节奏；否则会被第 3 条抢走，
+           导致新券永远凑不齐、永远核销不了）
+        3. 序列号/IMEI 精确匹配（不限时间）：同一个序列号不新建单号，
+           但本条带来"不同的卡券号"时不复用（属于第二笔，另建新单）
+        4. 窗口内最新的待核销单（status=0/2），且本条消息补齐它缺的那一项；
            若该单已有该项但本条消息给的是**不同的有效值**，视为纠正，复用同一行并改写：
            - 序列号/IMEI：文本和图片识别结果一视同仁（图片里同样是序列号/IMEI）
            - 卡券号：只认合法位数的卡券号（10-14位，见 _COUPON_* 常量），
@@ -469,11 +473,24 @@ class VoucherDetectionHandler(BaseHandler):
             order_model.shop_id == shop_id,
             order_model.session_id == from_uid,
         )
+        since = dt.now() - timedelta(minutes=PENDING_WINDOW_MINUTES)
 
         if coupon_no:
             found = base.filter(order_model.coupons == coupon_no).order_by(order_model.id.desc()).first()
             if found is not None:
                 return found
+
+        # 本条只有序列号 -> 先看有没有"已经收到卡券、正在等序列号"的待核销单，
+        # 有就把序列号补进这一单（否则会被下面的序列号匹配抢走，新券永远核销不了）
+        if sn and not coupon_no:
+            for waiting in (
+                base.filter(order_model.status != 1, order_model.created_at >= since)
+                .order_by(order_model.id.desc())
+                .limit(5)
+                .all()
+            ):
+                if waiting.coupons and not waiting.sn_imei:
+                    return waiting
 
         if sn:
             found = base.filter(order_model.sn_imei == sn).order_by(order_model.id.desc()).first()
@@ -485,7 +502,6 @@ class VoucherDetectionHandler(BaseHandler):
                 if not coupon_no or not found.coupons or found.coupons == coupon_no:
                     return found
 
-        since = dt.now() - timedelta(minutes=PENDING_WINDOW_MINUTES)
         # 待核销(0) 和 核销失败(2) 的单都可以被纠正；已核销成功(1) 的单是最终凭据，永不改写
         candidate = base.filter(
             order_model.status != 1,

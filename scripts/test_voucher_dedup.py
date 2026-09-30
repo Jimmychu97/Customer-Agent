@@ -41,6 +41,7 @@ USER_ID = "ACC1"
 CUST_UID = "CUST1"
 COUPON = "123456789012"
 COUPON2 = "999888777666"
+COUPON3 = "555666777888"
 SERIAL = "ABCDE12345"
 SERIAL2 = "XYZAB67890"
 META = {"shop_id": SHOP_ID, "user_id": USER_ID, "from_uid": CUST_UID}
@@ -780,6 +781,91 @@ def _all_orders(db):
                 for o in s.query(Order).order_by(Order.id).all()]
 
 
+async def scenario_19(db):
+    """线上 BUG 之二：客户分两次发 —— 先发新卡券，再发序列号
+
+    第一张券核销成功后，客户发新券 B（先落库待补序列号），再发序列号 S；
+    旧逻辑在"只带序列号"的消息里又命中了第一张已核销成功的单，
+    于是返回旧券 A -> 回复"该卡券已核销成功，卡券号还是第一张"，新券永远核销不了。
+    """
+    from Message.handlers.voucher_handler import VoucherDetectionHandler
+
+    print("S19 先发新券、再发序列号（分两次）")
+    handler = VoucherDetectionHandler()
+    handler._record_message = lambda *a, **k: None
+    sent, used, calls = [], set(), []
+
+    async def fake_send(shop_id, user_id, from_uid, text):
+        sent.append(text)
+        return True
+
+    def fake_api(serial, voucher_code, shop_id, user_id, from_uid, order_id):
+        calls.append({"sn": serial, "coupon": voucher_code})
+        if voucher_code in used:
+            handler._update_order_status(order_id, 2)
+            return f"❌ 卡券核销失败：该券已被核销\n卡券号：{voucher_code}", None
+        used.add(voucher_code)
+        handler._update_order_status(order_id, 1)
+        return "核销成功！", None
+
+    handler._send = fake_send
+    handler._query_and_verify = fake_api
+
+    async def send(text):
+        sent.clear()
+        await handler.handle(make_context(text), dict(META))
+
+    with db.session_scope() as s:
+        s.query(Order).delete()
+
+    await send("序列号 %s 卡券 %s" % (SERIAL, COUPON))
+    rows = _all_orders(db)
+    check("S19: 第一张券核销成功", len(rows) == 1 and rows[0][3] == 1, rows)
+
+    await send(COUPON2)                       # 新券，分开发（不带序列号）
+    rows = _all_orders(db)
+    check("S19: 新券先落库、等待序列号",
+          len(rows) == 2 and rows[1][2] == COUPON2 and rows[1][1] == "", rows)
+
+    await send("序列号 %s" % SERIAL)           # 再补序列号 -> 必须凑齐新券那一单
+    rows = _all_orders(db)
+    check("S19: 新单凑齐序列号+新券",
+          len(rows) == 2 and rows[1][1] == SERIAL and rows[1][2] == COUPON2, rows)
+    check("S19: 新单核销成功", len(rows) == 2 and rows[1][3] == 1, rows)
+    check("S19: 接口调用顺序 = [第一张券, 新券]",
+          [c["coupon"] for c in calls] == [COUPON, COUPON2], calls)
+    check("S19: 回复不再说'该卡券已核销成功'",
+          bool(sent) and "无需重复核销" not in sent[-1] and "核销成功" in sent[-1], sent[-1:])
+    check("S19: 第一单凭据不变", rows[0][2] == COUPON and rows[0][3] == 1, rows)
+
+    # 再换第三张券 + 新序列号，同样要能核销
+    await send(COUPON3)
+    await send("序列号 %s" % SERIAL2)
+    rows = _all_orders(db)
+    check("S19b: 第三张券另建单并核销成功",
+          len(rows) == 3 and rows[2][1] == SERIAL2 and rows[2][2] == COUPON3 and rows[2][3] == 1, rows)
+    check("S19b: 接口调用顺序 = [券1, 券2, 券3]",
+          [c["coupon"] for c in calls] == [COUPON, COUPON2, COUPON3], calls)
+
+    # S19c：反过来 —— 客户先发序列号、再发新券，最后又发一次序列号，也必须核销新券
+    with db.session_scope() as s:
+        s.query(Order).delete()
+    calls.clear()
+    used.clear()
+    await send("序列号 %s 卡券 %s" % (SERIAL, COUPON))       # 第一笔
+    await send("序列号 %s" % SERIAL)                          # 只发序列号（此刻没有新券）
+    await send(COUPON2)                                       # 再发新券
+    rows = _all_orders(db)
+    check("S19c: 新券另建一单待补序列号",
+          len(rows) == 2 and rows[1][2] == COUPON2 and rows[1][1] == "", rows)
+    await send("序列号 %s" % SERIAL)                          # 再补序列号
+    rows = _all_orders(db)
+    check("S19c: 新单凑齐并核销成功",
+          len(rows) == 2 and rows[1][1] == SERIAL and rows[1][2] == COUPON2 and rows[1][3] == 1, rows)
+    check("S19c: 接口调用顺序 = [券1, 券2]",
+          [c["coupon"] for c in calls] == [COUPON, COUPON2], calls)
+
+
 async def main():
     db, tmpdir = make_tmp_db()
     try:
@@ -800,6 +886,7 @@ async def main():
         await scenario_16(db)
         await scenario_17(h)
         await scenario_18(db)
+        await scenario_19(db)
         scenario_11()
         scenario_14()
     finally:
