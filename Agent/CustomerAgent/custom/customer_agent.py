@@ -211,6 +211,9 @@ class CustomerAgent(Bot):
 
             # 加载历史并检查压缩
             history = self._session_manager.get_history(session_id)
+            if not history and context:
+                # 会话历史为空时，回退读取主数据库中的消息记录，保证 AI 不会丢失客户说过的话
+                history = self._load_history_from_records(context)
             if self._session_manager.should_compress(session_id):
                 logger.info(f"触发上下文压缩: session_id={session_id}")
                 await self._compress_with_llm(session_id, history)
@@ -221,6 +224,7 @@ class CustomerAgent(Bot):
                 session_id=session_id,
                 role="user",
                 content=query,
+                source="customer",
             )
 
             # 构建 messages
@@ -234,6 +238,7 @@ class CustomerAgent(Bot):
                 session_id=session_id,
                 role="assistant",
                 content=final_content,
+                source="ai",
             )
 
             return Reply(ReplyType.TEXT, final_content or "抱歉，我暂时无法回复。")
@@ -272,6 +277,39 @@ class CustomerAgent(Bot):
             pass
 
         return False, None
+
+    def _load_history_from_records(self, context: Context) -> List[Dict[str, Any]]:
+        """从主数据库 message_records 表回退加载会话历史
+
+        仅当 agent_messages 中无历史时调用，保证切换数据库/首次运行等场景下，
+        AI 仍能知道客户之前说过什么。
+        """
+        try:
+            from database import db_manager
+            kwargs = context.kwargs
+            shop_id = getattr(kwargs, "shop_id", None)
+            from_uid = getattr(kwargs, "from_uid", None)
+            if not shop_id or not from_uid:
+                return []
+
+            records = db_manager.get_recent_messages(str(shop_id), str(from_uid), limit=20)
+            # 当前这条用户消息已经先落库，回退历史时应排除，避免与下面追加的 query 重复
+            if records and records[-1].get("direction") == "in":
+                records = records[:-1]
+
+            history = []
+            for r in records:
+                content = r.get("content") or ""
+                if not content:
+                    continue
+                role = "user" if r.get("direction") == "in" else "assistant"
+                history.append({"role": role, "content": content, "tool_call_id": None})
+            if history:
+                logger.info(f"[对话] 已从主数据库回退加载历史 {len(history)} 条: session={shop_id}:{from_uid}")
+            return history
+        except Exception as e:
+            logger.warning(f"[对话] 从主数据库回退加载历史失败: {e}")
+            return []
 
     async def _run_agent_loop(
         self,

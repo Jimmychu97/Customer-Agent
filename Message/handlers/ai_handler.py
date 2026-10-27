@@ -144,18 +144,12 @@ class AIReplyHandler(BaseHandler):
                 handler = VoucherDetectionHandler()
                 pending = handler._get_pending_order_state(shop_id, from_uid)
 
-                if pending == "need_coupon":
-                    # 已有 sn，图片应该是卡券截图，只提取卡券号
-                    sn = None
-                    coupon = _extract_coupon(recognized_text)
-                elif pending == "need_sn":
-                    # 已有 coupon，图片应该是序列号/IMEI截图，只提取 sn
-                    sn = _extract_imei(recognized_text) or _extract_serial(recognized_text)
-                    coupon = None
-                else:
-                    # 无待核销订单，先尝试提取 sn/IMEI，提取到了就不再提取 coupon
-                    sn = _extract_imei(recognized_text) or _extract_serial(recognized_text)
-                    coupon = None if sn else _extract_coupon(recognized_text)
+                # 提取图片里的序列号/IMEI 与卡券号。
+                # 注意：不再根据待核销单的缺失项把另一个已识别到的值丢掉——
+                # 客户重复发送同一张卡券/序列号时，交由 VoucherDetectionHandler
+                # 按卡券号/序列号复用同一张单，避免重复建单与空参数核销。
+                sn = _extract_imei(recognized_text) or _extract_serial(recognized_text)
+                coupon = _extract_coupon(recognized_text, exclude_imei=sn)
 
                 self.logger.info(f"[图片识别] pending={pending!r} 提取结果 sn={sn!r} coupon={coupon!r}")
                 if sn or coupon:
@@ -168,8 +162,10 @@ class AIReplyHandler(BaseHandler):
                     )
                     # 传入已提取好的值，避免 handle 内部重新提取时误识别 IMEI2 等为卡券号
                     image_metadata = {**metadata, "_image_sn": sn, "_image_coupon": coupon}
-                    await handler.handle(voucher_context, image_metadata)
-                    return None  # 核销处理器已发送消息
+                    handled = await handler.handle(voucher_context, image_metadata)
+                    if handled:
+                        return None  # 核销处理器已发送消息
+                    self.logger.info("[图片识别] 核销处理器未接管，走普通AI回复")
                 self.logger.info("[图片识别] 未检测到核销信息，走普通AI回复")
 
             return recognized_text
@@ -214,7 +210,11 @@ class AIReplyHandler(BaseHandler):
                 lambda: SendMessage(shop_id, user_id).send_text(from_uid, reply)
             )
             success = isinstance(result, dict) and result.get("success")
-            if not success:
+            if success:
+                self._record_outgoing(context, reply)
+                if context.type in (ContextType.IMAGE, ContextType.VIDEO):
+                    self._record_session_reply(context, reply)
+            else:
                 self.logger.warning(f"[AI] 发送失败 from_uid={from_uid} result={result}")
             return bool(success)
 
@@ -222,21 +222,51 @@ class AIReplyHandler(BaseHandler):
             self.logger.error(f"发送回复失败: {e}")
             return False
 
+    def _record_outgoing(self, context: Context, content: str):
+        """记录 AI 客服回复内容到数据库（客服回复统一为文本消息）"""
+        try:
+            from Message.core.persistence import record_outgoing_message
+            record_outgoing_message(context, content, msg_type="text")
+        except Exception as e:
+            self.logger.debug(f"记录客服回复失败: {e}")
+
+    def _record_session_reply(self, context: Context, content: str):
+        """将图片/视频等未走 CustomerAgent 的固定回复写入 AI 会话历史"""
+        try:
+            from Message.core.persistence import record_agent_session_message
+            channel = getattr(context.channel_type, "value", None) or "pinduoduo"
+            from_uid = getattr(context.kwargs, "from_uid", None)
+            if not from_uid:
+                return
+            record_agent_session_message(
+                channel=channel,
+                customer_uid=str(from_uid),
+                role="assistant",
+                content=content,
+            )
+        except Exception as e:
+            self.logger.debug(f"记录固定回复会话历史失败: {e}")
+
     def _get_pending_voucher_hint(self, shop_id: Optional[str], from_uid: Optional[str]) -> str:
-        """查询该用户是否有未完成的核销订单，返回引导缺少项的提示语"""
+        """查询该用户是否有未完成的核销订单，返回引导缺少项的提示语
+
+        统计范围与 VoucherDetectionHandler._select_order 一致：
+        待核销(0) + 核销失败(2) 的单都算（都可以继续补/纠正），已核销成功(1) 的不算。
+        """
         if not shop_id or not from_uid:
             return ""
         try:
             from database import db_manager
             from database.models import Order
             from datetime import datetime as dt, timedelta
-            ten_min_ago = dt.now() - timedelta(minutes=10)
+            from Message.handlers.voucher_handler import PENDING_WINDOW_MINUTES
+            since = dt.now() - timedelta(minutes=PENDING_WINDOW_MINUTES)
             with db_manager.session_scope() as session:
                 order = session.query(Order).filter(
                     Order.shop_id == shop_id,
                     Order.session_id == from_uid,
-                    Order.status == 0,
-                    Order.created_at >= ten_min_ago,
+                    Order.status != 1,
+                    Order.created_at >= since,
                 ).order_by(Order.id.desc()).first()
                 if not order:
                     return ""

@@ -1,12 +1,18 @@
 import os
 import json
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Dict, Any, Optional, Union, Generator
 from utils.logger_loguru import get_logger
-from database.models import Base, Channel, Shop, Account, Keyword
+from database.models import Base, Channel, Shop, Account, Keyword, MessageRecord
+
+# 客服侧（direction='out'）消息的内容级去重窗口（秒）：
+# 覆盖"程序自己发出的消息被平台回推"的情况（例如 AI 回复以 mall_cs 角色回推），
+# 这种回推的 msg_id 与本地记录不同，只能靠内容 + 时间窗口兜底去重。
+OUTGOING_DEDUP_SECONDS = 120
 
 
 class DatabaseManager:
@@ -488,6 +494,136 @@ class DatabaseManager:
             session.delete(keyword_obj)
             self.logger.info(f"成功删除关键词: {keyword}")
             return True
+
+    # ==================== 消息记录相关操作 ====================
+    def save_message(self, channel: str = "pinduoduo", shop_id: str = None, account_id: str = None,
+                     from_uid: str = None, nickname: str = None, msg_id: str = None,
+                     direction: str = "in", msg_type: str = None, content: str = None,
+                     raw_data: str = None) -> bool:
+        """保存一条聊天消息记录（客户发送或客服回复）
+
+        去重规则（返回 True 表示"已入库或已存在"）：
+        1. 同 shop_id + from_uid + msg_id 已存在 -> 跳过（平台重复推送）
+        2. direction='out' 且内容完全相同、且发生在 OUTGOING_DEDUP_SECONDS 秒内 -> 跳过
+           （覆盖"程序自己发出的消息被平台回推"，此时 msg_id 不同）
+        """
+        try:
+            with self.session_scope() as session:
+                if self._is_duplicate_message(
+                    session,
+                    shop_id=shop_id,
+                    from_uid=from_uid,
+                    direction=direction,
+                    msg_id=msg_id,
+                    content=content,
+                ):
+                    self.logger.info(
+                        f"[消息记录] 重复消息已跳过 direction={direction} msg_type={msg_type} "
+                        f"from_uid={from_uid} msg_id={msg_id}"
+                    )
+                    return True
+                record = MessageRecord(
+                    channel=channel or "pinduoduo",
+                    shop_id=str(shop_id) if shop_id is not None else "",
+                    account_id=str(account_id) if account_id is not None else None,
+                    from_uid=str(from_uid) if from_uid is not None else "",
+                    nickname=str(nickname) if nickname is not None else None,
+                    msg_id=str(msg_id) if msg_id is not None else None,
+                    direction=direction or "in",
+                    msg_type=str(msg_type) if msg_type is not None else None,
+                    content=content,
+                    raw_data=raw_data,
+                )
+                session.add(record)
+            return True
+        except Exception as e:
+            self.logger.error(f"保存消息记录失败: {e}")
+            return False
+
+    def _is_duplicate_message(self, session, shop_id: str = None, from_uid: str = None,
+                              direction: str = "in", msg_id: str = None,
+                              content: str = None) -> bool:
+        """判断一条消息是否已经在库（需传入已打开的 session）"""
+        try:
+            query = session.query(MessageRecord.id).filter(
+                MessageRecord.shop_id == (str(shop_id) if shop_id is not None else ""),
+                MessageRecord.from_uid == (str(from_uid) if from_uid is not None else ""),
+            )
+            if msg_id:
+                if query.filter(MessageRecord.msg_id == str(msg_id)).first():
+                    return True
+            if direction == "out" and content:
+                since = datetime.now() - timedelta(seconds=OUTGOING_DEDUP_SECONDS)
+                if query.filter(
+                    MessageRecord.direction == "out",
+                    MessageRecord.content == content,
+                    MessageRecord.created_at >= since,
+                ).first():
+                    return True
+            return False
+        except Exception as e:
+            self.logger.debug(f"消息去重检查失败: {e}")
+            return False
+
+    def message_exists(self, shop_id: str = None, from_uid: str = None, direction: str = None,
+                       msg_id: str = None, content: str = None,
+                       within_seconds: int = None) -> bool:
+        """只读查询：是否存在符合条件的消息记录"""
+        with self.session_scope() as session:
+            query = session.query(MessageRecord.id)
+            if shop_id is not None:
+                query = query.filter(MessageRecord.shop_id == str(shop_id))
+            if from_uid is not None:
+                query = query.filter(MessageRecord.from_uid == str(from_uid))
+            if direction:
+                query = query.filter(MessageRecord.direction == direction)
+            if msg_id:
+                query = query.filter(MessageRecord.msg_id == str(msg_id))
+            if content is not None:
+                query = query.filter(MessageRecord.content == content)
+            if within_seconds:
+                since = datetime.now() - timedelta(seconds=int(within_seconds))
+                query = query.filter(MessageRecord.created_at >= since)
+            return query.first() is not None
+
+    def get_recent_messages(self, shop_id: str, from_uid: str, limit: int = 50,
+                            direction: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取指定店铺下某客户最近的聊天消息（按时间升序返回）"""
+        with self.session_scope() as session:
+            query = session.query(MessageRecord).filter(
+                MessageRecord.shop_id == str(shop_id),
+                MessageRecord.from_uid == str(from_uid),
+            )
+            if direction:
+                query = query.filter(MessageRecord.direction == direction)
+            records = query.order_by(MessageRecord.created_at.desc(), MessageRecord.id.desc()).limit(limit).all()
+            records = list(reversed(records))
+            return [
+                {
+                    'id': r.id,
+                    'channel': r.channel,
+                    'shop_id': r.shop_id,
+                    'account_id': r.account_id,
+                    'from_uid': r.from_uid,
+                    'nickname': r.nickname,
+                    'msg_id': r.msg_id,
+                    'direction': r.direction,
+                    'msg_type': r.msg_type,
+                    'content': r.content,
+                    'created_at': r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else None,
+                }
+                for r in records
+            ]
+
+    def count_messages(self, shop_id: str = None, from_uid: str = None) -> int:
+        """统计消息记录条数（可按店铺/客户过滤）"""
+        with self.session_scope() as session:
+            query = session.query(MessageRecord)
+            if shop_id:
+                query = query.filter(MessageRecord.shop_id == str(shop_id))
+            if from_uid:
+                query = query.filter(MessageRecord.from_uid == str(from_uid))
+            return query.count()
 
 _db_instance: Optional["DatabaseManager"] = None
 

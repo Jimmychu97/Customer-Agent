@@ -55,6 +55,9 @@ import sys
 is_frozen = getattr(sys, 'frozen', False)
 
 # 添加控制台处理器（仅在开发环境）
+# enqueue=True：日志交给后台线程写。否则一旦这个控制台窗口被鼠标点中进入「快速编辑/选择」
+# 状态，Windows 会挂起所有 stdout 写入，本进程随之整体卡死（客户消息不处理，必须回到窗口
+# 按一下回车才继续）。异步写日志后，控制台再被选中也不会阻塞业务线程。
 if not is_frozen:
     logger.add(
         sys.stdout,
@@ -62,7 +65,8 @@ if not is_frozen:
         level=log_level.upper(),
         colorize=True,
         backtrace=True,
-        diagnose=not is_frozen
+        diagnose=not is_frozen,
+        enqueue=True,
     )
 
 # 添加文件处理器（自动轮转和压缩）
@@ -75,7 +79,8 @@ logger.add(
     compression="zip",
     encoding="utf-8",
     backtrace=True,
-    diagnose=not is_frozen
+    diagnose=not is_frozen,
+    enqueue=True,
 )
 
 # 全局logger对象（保持向后兼容）

@@ -75,6 +75,19 @@ def main():
     logger = _get_logger("App")
     logger.info("应用程序启动...")
 
+    # 部署自检：避免"新版调用 + 旧版被调"（例如 DatabaseManager 缺少 save_message）
+    # 造成消息记录静默丢失（历史上表现为 WARNING: 'DatabaseManager' object has no attribute 'save_message'）
+    deploy_problems = []
+    try:
+        from Message.core.persistence import check_deployment
+        deploy_problems = check_deployment()
+        if deploy_problems:
+            logger.error("部署不完整，消息记录不可用：" + "；".join(deploy_problems))
+        else:
+            logger.info("部署自检通过：消息记录功能可用")
+    except Exception as e:
+        logger.warning(f"部署自检执行失败: {e}")
+
     t0 = time.perf_counter()
     t_import = time.perf_counter()
     from ui.main_ui import MainWindow  # noqa: F401
@@ -84,6 +97,22 @@ def main():
     window.show()
     logger.info(f"  MainWindow 实例化耗时: {time.perf_counter() - t_window:.2f}s")
     logger.info(f"窗口创建与显示总耗时: {time.perf_counter() - t0:.2f}s")
+
+    # 部署不完整时在界面顶部给出明确提示（不阻断启动）
+    if deploy_problems:
+        try:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+            InfoBar.error(
+                title="部署不完整",
+                content="消息记录不可用：" + deploy_problems[0],
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=15000,
+                parent=window,
+            )
+        except Exception:
+            pass
 
     # 将窗口设为应用级别的变量，防止被垃圾回收
     app.main_window = window

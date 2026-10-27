@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Boolean, UniqueConstraint, Numeric
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, DateTime, Boolean, UniqueConstraint, Numeric, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 from datetime import datetime
@@ -235,3 +235,28 @@ class Order(Base):
 
     def __repr__(self):
         return f"<Order(id={self.id}, shop_id='{self.shop_id}', session_id='{self.session_id}', sn_imei='{self.sn_imei}', status={self.status})>"
+
+
+class MessageRecord(Base):
+    """聊天消息记录表，保存客户发送和客服回复的完整内容，用于会话回溯与 AI 上下文"""
+    __tablename__ = 'message_records'
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment='主键ID')
+    channel = Column(String(50), nullable=False, default='pinduoduo', index=True, comment='渠道')
+    shop_id = Column(String(100), nullable=False, index=True, comment='店铺ID')
+    account_id = Column(String(100), nullable=True, comment='客服账号ID(user_id)')
+    from_uid = Column(String(100), nullable=False, index=True, comment='客户UID')
+    nickname = Column(String(100), nullable=True, comment='客户昵称')
+    msg_id = Column(String(100), nullable=True, comment='平台消息ID')
+    direction = Column(String(10), nullable=False, default='in', index=True, comment='消息方向: in-客户发送, out-客服回复')
+    msg_type = Column(String(30), nullable=True, comment='消息类型')
+    content = Column(Text, nullable=True, comment='消息内容')
+    raw_data = Column(Text, nullable=True, comment='原始消息JSON')
+    created_at = Column(DateTime, default=datetime.now, nullable=False, index=True, comment='记录时间')
+
+    __table_args__ = (
+        Index('ix_message_records_shop_uid_time', 'shop_id', 'from_uid', 'created_at'),
+    )
+
+    def __repr__(self):
+        return f"<MessageRecord(id={self.id}, direction='{self.direction}', from_uid='{self.from_uid}', msg_type='{self.msg_type}')>"
