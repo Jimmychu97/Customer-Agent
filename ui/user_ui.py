@@ -4,7 +4,7 @@ import asyncio
 from typing import Any, Dict, Optional
 from PyQt6.QtCore import Qt, pyqtSignal, QThread, pyqtSignal as Signal, QTimer
 from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
-                            QMessageBox, QDialog, QFormLayout)
+                            QMessageBox, QDialog, QFormLayout, QApplication)
 from PyQt6.QtGui import QFont, QPixmap
 from qfluentwidgets import (CardWidget, SubtitleLabel, CaptionLabel, BodyLabel,
                            PrimaryPushButton, PushButton, StrongBodyLabel,
@@ -25,6 +25,8 @@ class LoginThread(QThread):
         self.account_data = account_data
 
     def run(self):
+        name = self.account_data.get("username")
+        logger.info(f"[登录线程] 开始登录 {name}")
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -36,9 +38,11 @@ class LoginThread(QThread):
                 )
             )
             loop.close()
+            logger.info(f"[登录线程] 结束 {name} result={'成功' if result else '失败'}")
             self.login_finished.emit(result)
         except Exception as e:
-            logger.error(f"登录线程异常: {e}")
+            # 打堆栈：登录是异步 + 浏览器自动化，只有异常类型看不出根因
+            logger.opt(exception=True).error(f"[登录线程] 异常 {name}: {e}")
             self.login_finished.emit(False)
 
 
@@ -573,18 +577,40 @@ class UserManagerWidget(QFrame):
 
     def onAddAccount(self):
         """通过登录添加账号"""
-        dialog = AddAccountDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            account_info = dialog.getAccountInfo()
-            
-            # 禁用添加按钮，防止重复点击
-            self.add_btn.setEnabled(False)
-            self.add_btn.setText("添加中...")
+        logger.info("点击「添加账号」，准备打开登录对话框")
+        try:
+            dialog = AddAccountDialog(self)
+            # 位置交给 Qt 默认处理（居中到父窗口，与 7 月那版一致）。
+            # 之前我在这里用 self.geometry() 手动居中是错的：那是页面在主窗口里的
+            # 局部坐标，算出来的全局位置会把对话框挪到别处，用户就感觉"点了没反应"。
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        except Exception:
+            logger.opt(exception=True).error("打开「添加账号」对话框失败")
+            QMessageBox.critical(
+                self, "错误", "打开添加账号对话框失败，详情见 logs/app.log")
+            return
 
-            # 创建并启动登录线程
+        if not accepted:
+            logger.info("添加账号对话框已取消")
+            return
+
+        account_info = dialog.getAccountInfo()
+        logger.info(f"添加账号：开始登录 {account_info['username']}")
+        # 禁用添加按钮，防止重复点击
+        self.add_btn.setEnabled(False)
+        self.add_btn.setText("添加中...")
+
+        # 创建并启动登录线程
+        try:
             self.add_account_thread = LoginThread(account_info)
             self.add_account_thread.login_finished.connect(self.onAddAccountLoginFinished)
             self.add_account_thread.start()
+        except Exception:
+            logger.opt(exception=True).error("启动登录线程失败")
+            self.add_btn.setEnabled(True)
+            self.add_btn.setText("添加账号")
+            QMessageBox.critical(
+                self, "错误", "启动登录线程失败，详情见 logs/app.log")
 
     def onAddAccountLoginFinished(self, result: Optional[Dict[str, Any]]):
         """处理添加账号时的登录结果"""
@@ -715,19 +741,25 @@ class UserManagerWidget(QFrame):
         
         if reply == QMessageBox.StandardButton.Yes:
             try:
+                logger.info(
+                    f"删除账号：确认删除 username={account_data['username']} "
+                    f"user_id={account_data['user_id']} shop={account_data['shop_id']}")
                 success = db_manager.delete_account(
                     account_data["channel_name"],
                     account_data["shop_id"],
                     account_data["user_id"]
                 )
-                
+
                 if success:
+                    logger.info(f"删除账号：成功 username={account_data['username']}")
                     QMessageBox.information(self, "成功", "账号删除成功！")
                     self.reloadAccounts()
                 else:
+                    logger.warning(f"删除账号：失败 username={account_data['username']}")
                     QMessageBox.warning(self, "失败", "账号删除失败！")
                     
             except Exception as e:
+                logger.opt(exception=True).error(f"删除账号异常 username={account_data['username']}: {e}")
                 QMessageBox.critical(self, "错误", f"删除账号时发生错误：{str(e)}")
 
 
@@ -880,10 +912,17 @@ class AddAccountDialog(QDialog):
 
         layout = QFormLayout(self)
         layout.setSpacing(15)
-        
+
+        # 校验提示直接显示在对话框里：弹窗可能被主窗口挡住/在别的显示器上，
+        # 只弹 QMessageBox 时用户会觉得「点了确定没反应」。
+        self.hint_label = QLabel("")
+        self.hint_label.setStyleSheet("color: #d13438;")
+        self.hint_label.setWordWrap(True)
+        layout.addRow(self.hint_label)
+
         # 账号信息
         self.username_edit = LineEdit(self)
-        self.username_edit.setPlaceholderText("请输入拼多多账号用户名")
+        self.username_edit.setPlaceholderText("请输入拼多多账号用户名（手机号）")
         self.username_edit.setFixedSize(300, 32)
         self.password_edit = LineEdit(self)
         self.password_edit.setEchoMode(LineEdit.EchoMode.Password)
@@ -913,17 +952,33 @@ class AddAccountDialog(QDialog):
         # 连接信号
         self.ok_btn.clicked.connect(self.validateAndAccept)
         self.cancel_btn.clicked.connect(self.reject)
-    
+        # 回车等同点「确定」，并让光标直接落在用户名上
+        self.username_edit.returnPressed.connect(self.validateAndAccept)
+        self.password_edit.returnPressed.connect(self.validateAndAccept)
+        self.username_edit.setFocus()
+
+    def _show_hint(self, text: str) -> None:
+        self.hint_label.setText(text)
+
     def validateAndAccept(self):
-        """验证输入并接受"""
-        if not self.username_edit.text().strip():
-            QMessageBox.warning(self, "输入错误", "用户名不能为空！")
+        """验证输入并接受（不通过时在对话框内提示，并写日志便于排查）"""
+        username = self.username_edit.text().strip()
+        password = self.password_edit.text().strip()
+
+        if not username:
+            self._show_hint("请输入拼多多账号用户名（手机号），不能为空")
+            self.username_edit.setFocus()
+            logger.info("添加账号：校验未通过（用户名为空）")
             return
-            
-        if not self.password_edit.text().strip():
-            QMessageBox.warning(self, "输入错误", "密码不能为空！")
+
+        if not password:
+            self._show_hint("请输入密码，不能为空")
+            self.password_edit.setFocus()
+            logger.info(f"添加账号：校验未通过（密码为空）username={username}")
             return
-            
+
+        self._show_hint("")
+        logger.info(f"添加账号：校验通过，准备登录 {username}")
         self.accept()
         
     def getAccountInfo(self) -> dict:

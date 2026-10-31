@@ -20,6 +20,9 @@ import tempfile
 import shutil
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ.setdefault("LOG_FILE", "logs/test.log")  # 自测日志别写进 app.log
+os.environ.setdefault("ORDER_BROWSER_FALLBACK", "0")  # 自测不启动浏览器
+os.environ.setdefault("ORDER_HEARTBEAT", "0")  # 自测不跑会话心跳
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -27,6 +30,12 @@ except Exception:
     pass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 沙箱里 loguru 的 enqueue 需要命名管道，离线自测关掉异步写日志
+import loguru
+
+_o = loguru.logger.add
+loguru.logger.add = lambda *a, **k: (k.__setitem__("enqueue", False), _o(*a, **k))[1]
 
 from datetime import datetime as dt, timedelta
 

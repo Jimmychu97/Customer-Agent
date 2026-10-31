@@ -23,20 +23,28 @@ class MessageHandlerMixin:
 
         try:
             existing_consumer = message_consumer_manager.get_consumer(queue_name)
+            if existing_consumer and reuse and existing_consumer.can_be_reused():
+                # 只有「还在跑 + 绑定在当前事件循环」才复用；
+                # 每次启动自动回复都是新线程新循环，复用旧循环的消费者会让消息入队后无人消费
+                self.logger.info(f"复用已有消费者: {queue_name}")
+                return
             if existing_consumer:
-                # 重连时且消费者运行中，直接复用不重建
-                if reuse and existing_consumer.is_running():
-                    self.logger.debug(f"复用已有消费者: {queue_name}")
-                    return
-                self.logger.info(f"消费者 {queue_name} 已存在，先停止并重新创建")
+                if existing_consumer.is_running():
+                    self.logger.warning(
+                        f"消费者 {queue_name} 绑定的事件循环已失效（已重启线程），重建消费者"
+                    )
+                else:
+                    self.logger.info(f"消费者 {queue_name} 已存在，先停止并重新创建")
                 try:
                     await message_consumer_manager.stop_consumer(queue_name)
                 except Exception as e:
                     self.logger.warning(f"停止旧消费者失败: {queue_name}, {e}")
-                try:
-                    queue_manager.recreate_queue(queue_name)
-                except Exception as e:
-                    self.logger.warning(f"重新创建队列失败: {queue_name}, {e}")
+
+            # asyncio.Queue 绑定事件循环，新建消费者前必须重建，否则队列仍挂在已退出的循环上
+            try:
+                queue_manager.recreate_queue(queue_name)
+            except Exception as e:
+                self.logger.warning(f"重新创建队列失败: {queue_name}, {e}")
 
             consumer = message_consumer_manager.create_consumer(queue_name, max_concurrent=10)
 
@@ -50,7 +58,7 @@ class MessageHandlerMixin:
                 consumer.add_handler(handler)
 
             await message_consumer_manager.start_consumer(queue_name)
-            self.logger.debug(f"消息消费者已启动: {queue_name}")
+            self.logger.info(f"消息消费者已启动: {queue_name}")
 
         except Exception as e:
             self.logger.error(f"设置消息消费者失败: {e}")
@@ -136,14 +144,7 @@ class MessageHandlerMixin:
         """将客户发送的消息内容落库（只记录进入队列处理的消息）"""
         try:
             from Message.core.persistence import record_incoming_message
-            ok = record_incoming_message(context)
-            kwargs = context.kwargs
-            customer_uid = getattr(kwargs, "from_uid", None)
-            msg_id = getattr(kwargs, "msg_id", None)
-            if ok:
-                self.logger.info(f"[消息记录] 客户消息已记录 customer={customer_uid} msg_id={msg_id}")
-            else:
-                self.logger.warning(f"[消息记录] 客户消息落库失败 customer={customer_uid} msg_id={msg_id}")
+            record_incoming_message(context)
         except Exception as e:
             self.logger.debug(f"记录客户消息失败: {e}")
 
@@ -159,56 +160,26 @@ class MessageHandlerMixin:
             channel = getattr(context.channel_type, "value", None) or "pinduoduo"
             shop_id = getattr(kwargs, "shop_id", None)
             user_id = getattr(kwargs, "user_id", None)
-            to_uid = getattr(kwargs, "to_uid", None)
-            customer_uid = to_uid or getattr(kwargs, "from_uid", None)
+            customer_uid = getattr(kwargs, "to_uid", None) or getattr(kwargs, "from_uid", None)
             content = context.content or ""
-            msg_id = getattr(kwargs, "msg_id", None)
-            if not to_uid and customer_uid:
-                # mall_cs 消息的 from_uid 是本店客服账号，正常归属应取 to_uid；
-                # 缺失时只能退回 from_uid，可能出现归属错误，这里明确告警。
-                self.logger.warning(
-                    f"[消息记录] 人工客服消息缺少 to_uid，退回归属到 from_uid={customer_uid}"
-                    "（该值可能是客服账号而非客户，请核查）"
-                )
             if not customer_uid:
-                self.logger.warning(
-                    f"[消息记录] 人工客服消息缺少客户 UID，无法归属 msg_id={msg_id} "
-                    f"content={str(content)[:20]!r}"
-                )
                 return
 
-            from Message.core.persistence import (
-                save_outgoing_raw,
-                record_agent_session_message,
-                SOURCE_MALL_CS,
-            )
-            saved = save_outgoing_raw(
+            from Message.core.persistence import save_outgoing_raw, record_agent_session_message
+            save_outgoing_raw(
                 shop_id=shop_id,
                 user_id=user_id,
                 from_uid=str(customer_uid),
                 content=content,
                 msg_type="mall_cs",
                 channel=channel,
-                msg_id=msg_id,
             )
-            session_ok = record_agent_session_message(
+            record_agent_session_message(
                 channel=channel,
                 customer_uid=str(customer_uid),
                 role="assistant",
                 content=content,
-                source=SOURCE_MALL_CS,
             )
-            text = content if isinstance(content, str) else str(content)
-            if saved:
-                self.logger.info(
-                    f"[消息记录] 人工客服消息已记录 customer={customer_uid} msg_id={msg_id} "
-                    f"len={len(text)} 会话历史={'ok' if session_ok else 'failed'}"
-                )
-            else:
-                self.logger.warning(
-                    f"[消息记录] 人工客服消息落库失败 customer={customer_uid} msg_id={msg_id} "
-                    f"会话历史={'ok' if session_ok else 'failed'}"
-                )
         except Exception as e:
             self.logger.debug(f"记录本店客服消息失败: {e}")
 

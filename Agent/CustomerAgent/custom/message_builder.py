@@ -40,6 +40,10 @@ class MessageBuilder:
 
     def _build_system_prompt(self) -> None:
         """构建系统 Prompt"""
+        self.system_prompt = self._compose_system_prompt(self.instructions)
+
+    def _compose_system_prompt(self, instructions: List[str]) -> str:
+        """按给定指令列表拼装系统 Prompt（仅发货模式下会传入过滤后的指令）"""
         parts = []
 
         # 硬编码的角色描述（亲切活泼风格）
@@ -55,8 +59,8 @@ class MessageBuilder:
 """
         parts.append(description)
 
-        if self.instructions:
-            parts.append("---\n" + "\n".join(f"- {i}" for i in self.instructions))
+        if instructions:
+            parts.append("---\n" + "\n".join(f"- {i}" for i in instructions))
 
         # 硬编码的额外上下文（工具介绍+示例）
         additional_context = """---
@@ -92,7 +96,7 @@ class MessageBuilder:
 """
         parts.append(additional_context)
 
-        self.system_prompt = "\n\n".join(parts) if parts else "你是一个电商客服。"
+        return "\n\n".join(parts) if parts else "你是一个电商客服。"
 
     def build_dependencies(self, context: Context) -> Dict[str, Any]:
         """
@@ -186,9 +190,22 @@ class MessageBuilder:
         """
         messages = []
 
+        # 服务模式由「客户下单的商品」决定，不再默认索要卡券：
+        # 只有商品确实配置成卡券核销(0)时才保留带"卡券"的指令（如"回复结尾必须加上…
+        # 商品卡券…"）；仅发货(1)、二选一兼容(2)、未配置(None) 一律去掉并追加对应规则
+        service_mode = dependencies.get("service_mode") if dependencies else None
+        coupon_mode = service_mode == 0
+        ship_mode = service_mode == 1
+        unknown_mode = service_mode is None
+        system_prompt = self.system_prompt
+        if not coupon_mode:
+            system_prompt = self._compose_system_prompt(
+                [i for i in self.instructions if "卡券" not in i]
+            )
+
         # System prompt（占位符替换）
-        if self.system_prompt:
-            content = self.system_prompt
+        if system_prompt:
+            content = system_prompt
             if dependencies:
                 # 动态获取商品列表并注入到 dependencies
                 self._inject_product_list(dependencies)
@@ -203,7 +220,43 @@ class MessageBuilder:
                 session_info += f"- recipient_uid: {dependencies.get('recipient_uid', '')}（接收消息的用户UID，发送商品卡片时使用）\n"
                 session_info += f"- shop_name: {dependencies.get('shop_name', '')}（店铺名称）\n"
                 session_info += f"- channel_type: {dependencies.get('channel_type', '')}（渠道类型）\n"
+                session_info += (
+                    f"- 服务模式: {service_mode if service_mode is not None else '未确定'}"
+                    f"（依据 {dependencies.get('service_mode_evidence', 'none')}）\n"
+                )
                 session_info += "\n【重要】调用工具时，shop_id、user_id 等参数必须使用上面【当前会话信息】中给出的值！"
+                if ship_mode:
+                    session_info += (
+                        "\n\n【服务模式：仅发货】该商品拍下后只需「序列号/IMEI」即可完成发货与查询，"
+                        "不要向客户索要商品卡券/卡券号，也不要引导客户去「待收货-查看卡券」。"
+                    )
+                elif service_mode == 2:
+                    session_info += (
+                        "\n\n【服务模式：二选一兼容】不要主动索要卡券：客户给卡券号就走核销，"
+                        "只给序列号/IMEI 或拼多多订单号就走发货。"
+                    )
+                elif unknown_mode:
+                    session_info += (
+                        "\n\n【服务模式：未确定】严禁主动提「卡券」「卡券号」「查看卡券」，"
+                        "也不要让客户在两种服务之间选；按二选一回答："
+                        "客户给的是卡券号就按核销流程答，给的是序列号/IMEI 就按发货流程答，"
+                        "再按下面「客户待发货订单」核对订单。"
+                    )
+
+                # 客户待发货订单：让 AI 自己知道这单是什么，别让客户发订单卡片/抄订单号
+                order_hint = str(dependencies.get("pending_order_hint") or "").strip()
+                if order_hint:
+                    session_info += (
+                        f"\n\n【客户待发货订单】{order_hint}。"
+                        "客户问订单/发货/什么时候发时，直接用这条回答并请他发序列号/IMEI；"
+                        "严禁再让他发订单卡片或抄订单号。"
+                    )
+                elif ship_mode or unknown_mode:
+                    session_info += (
+                        "\n\n【客户待发货订单】后台暂时没查到（可能刚下单）。"
+                        "若客户问订单，让他点聊天框右下角「+」→ 选择「订单」→ 发送订单卡片；"
+                        "不要让他抄订单号。"
+                    )
                 content += session_info
 
             messages.append({"role": "system", "content": content})

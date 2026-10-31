@@ -209,6 +209,43 @@ class CustomerAgent(Bot):
                 session_id = f"fallback_{abs(hash(query)) % 100000}"
                 dependencies = {}
 
+            # 服务模式：先读「客户这一单」的落库结论（与消息分派同一个来源），
+            # 读不到再退回历史消息里的商品卡；都没有则为 None（未确定，不索要卡券）
+            if dependencies:
+                try:
+                    from core.service_mode import (
+                        EVIDENCE_HISTORY,
+                        resolve_service_mode_for_customer_optional,
+                        resolve_service_mode_from_orders_db,
+                    )
+
+                    shop_id = getattr(context.kwargs, "shop_id", None)
+                    order_resolution = await asyncio.to_thread(
+                        resolve_service_mode_from_orders_db, shop_id, from_uid)
+                    if order_resolution.is_known:
+                        dependencies["service_mode"] = order_resolution.mode
+                        dependencies["service_mode_evidence"] = order_resolution.evidence
+                    else:
+                        history_mode = resolve_service_mode_for_customer_optional(
+                            shop_id, from_uid)
+                        dependencies["service_mode"] = history_mode
+                        dependencies["service_mode_evidence"] = (
+                            EVIDENCE_HISTORY if history_mode is not None else "none")
+                except Exception as e:
+                    logger.debug(f"[对话] 解析服务模式失败: {e}")
+
+                # 客户当前待发货订单：注入提示词，AI 就不用再让客户发订单卡片/抄订单号
+                try:
+                    from core.order_lookup import pending_order_hint
+
+                    shop_id = getattr(context.kwargs, "shop_id", None)
+                    user_id = getattr(context.kwargs, "user_id", None)
+                    if shop_id and user_id and from_uid:
+                        dependencies["pending_order_hint"] = await asyncio.to_thread(
+                            pending_order_hint, shop_id, user_id, from_uid)
+                except Exception as e:
+                    logger.debug(f"[对话] 解析客户待发货订单失败: {e}")
+
             # 加载历史并检查压缩
             history = self._session_manager.get_history(session_id)
             if not history and context:

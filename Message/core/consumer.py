@@ -4,7 +4,7 @@
 """
 
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from utils.logger_loguru import get_logger
 from bridge.context import Context
 from .queue import queue_manager
@@ -26,6 +26,8 @@ class MessageConsumer:
         self.running = False
         self.consumer_task = None
         self._tasks: set = set()
+        # 消费者任务所属的事件循环：线程/循环换了就不能复用（否则消息入队无人消费）
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.logger = get_logger(f"Consumer.{queue_name}")
 
     def add_handler(self, handler: MessageHandler):
@@ -37,6 +39,24 @@ class MessageConsumer:
         """检查消费者是否正在运行"""
         return self.running
 
+    def is_bound_to_current_loop(self) -> bool:
+        """消费者任务是否仍绑定在当前运行的事件循环上
+
+        每次「启动自动回复」都会新建线程和事件循环；旧消费者的任务留在已退出的
+        循环里，此时复用会让消息入队却永远无人消费。
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return False
+        try:
+            return loop is asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+
+    def can_be_reused(self) -> bool:
+        """可复用 = 还在跑 且 绑定在当前事件循环"""
+        return self.running and self.is_bound_to_current_loop()
+
     async def start(self):
         """启动消费者"""
         if self.running:
@@ -44,6 +64,7 @@ class MessageConsumer:
             return
 
         self.running = True
+        self._loop = asyncio.get_running_loop()
         self.consumer_task = asyncio.create_task(self._consume_loop())
         self.logger.info(f"Consumer {self.queue_name} started")
 
@@ -77,6 +98,9 @@ class MessageConsumer:
                 await self.consumer_task
             except asyncio.CancelledError:
                 pass
+            except RuntimeError as e:
+                # 任务绑定在已关闭的事件循环上，无法在当前循环里等待
+                self.logger.warning(f"Consumer {self.queue_name} 任务所在循环已关闭，跳过等待: {e}")
 
         # 等待所有正在处理的任务完成
         if self._tasks:
@@ -177,12 +201,15 @@ class MessageConsumerManager:
             self.logger.error(f"Consumer {queue_name} not found")
 
     async def stop_consumer(self, queue_name: str):
-        """停止消费者"""
-        consumer = self.get_consumer(queue_name)
-        if consumer:
+        """停止消费者并移出注册表（下次启动会新建，避免复用已失效的事件循环）"""
+        consumer = self._consumers.pop(queue_name, None)
+        if not consumer:
+            self.logger.debug(f"Consumer {queue_name} not found")
+            return
+        try:
             await consumer.stop()
-        else:
-            self.logger.error(f"Consumer {queue_name} not found")
+        except Exception as e:
+            self.logger.warning(f"停止消费者 {queue_name} 时异常（忽略）: {e}")
 
     def list_consumers(self) -> List[str]:
         """列出所有消费者"""
@@ -190,8 +217,13 @@ class MessageConsumerManager:
 
     async def stop_all(self):
         """停止所有消费者"""
-        for consumer in self._consumers.values():
-            await consumer.stop()
+        consumers = list(self._consumers.values())
+        self._consumers.clear()
+        for consumer in consumers:
+            try:
+                await consumer.stop()
+            except Exception as e:
+                self.logger.warning(f"停止消费者 {consumer.queue_name} 时异常（忽略）: {e}")
         self.logger.info("All consumers stopped")
 
 

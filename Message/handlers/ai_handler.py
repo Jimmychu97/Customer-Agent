@@ -272,6 +272,37 @@ class AIReplyHandler(BaseHandler):
                     return ""
                 has_sn = bool(order.sn_imei)
                 has_coupon = bool(order.coupons)
+
+                # 服务模式按「客户下单的商品」分流：发货单不索要卡券
+                from core.service_mode import SERVICE_MODE_SHIP, SERVICE_MODE_VOUCHER
+
+                if order.service_mode == SERVICE_MODE_SHIP:
+                    if not has_sn:
+                        return (
+                            "🔔 待发货，还缺序列号/IMEI！\n"
+                            "拨号输入 *#06# 可查 IMEI，或设置 → 通用 → 关于本机 → 序列号，发给我即可完成查询。"
+                        )
+                    if not order.order_sn:
+                        return (
+                            "🔔 待发货，还缺拼多多订单号！\n"
+                            "【待收货 → 点击商品 → 复制订单号】发给我即可完成发货。"
+                        )
+                    return ""
+
+                # 服务模式未确定（商品没配置）：不默认索要卡券，让客户发订单卡片（卡里带商品ID）
+                if order.service_mode != SERVICE_MODE_VOUCHER:
+                    if has_sn and not has_coupon:
+                        return (
+                            "🔔 还缺拼多多订单号！\n"
+                            "【待收货 → 我的订单 → 选该商品 → 复制订单号】发我即可完成发货与查询。"
+                        )
+                    if has_coupon and not has_sn:
+                        return (
+                            "🔔 还缺序列号/IMEI！\n"
+                            "拨号输入 *#06# 可查 IMEI，或设置 → 通用 → 关于本机 → 序列号。"
+                        )
+                    return ""
+
                 if has_sn and not has_coupon:
                     return (
                         "🔔 核销进行中，还缺卡券号！\n"

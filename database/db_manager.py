@@ -38,10 +38,14 @@ class DatabaseManager:
         # 创建表结构
         Base.metadata.create_all(self.engine)
 
+        self.logger = get_logger()
+
         # 迁移：为旧数据库补充 proxy 列
         self._migrate_add_proxy_column()
 
-        self.logger = get_logger()
+        # 迁移：为旧数据库补充服务模式相关列
+        self._migrate_add_service_mode_columns()
+
         self.init_db()
 
     def _migrate_add_proxy_column(self):
@@ -58,6 +62,35 @@ class DatabaseManager:
                     conn.commit()
         except Exception:
             pass
+
+    def _migrate_add_service_mode_columns(self):
+        """为旧数据库补充服务模式相关列（幂等）
+
+        分别检查 product_knowledge.service_mode、orders.order_sn、
+        orders.service_mode 是否存在，缺失才执行 ALTER TABLE ADD COLUMN。
+        SQLite 对新增可空列是安全的，不会重写既有数据。
+        """
+        try:
+            from sqlalchemy import text
+
+            targets = [
+                ('product_knowledge', 'service_mode', 'INTEGER NOT NULL DEFAULT 0'),
+                ('orders', 'order_sn', 'VARCHAR(100)'),
+                ('orders', 'service_mode', 'INTEGER'),
+            ]
+            with self.engine.connect() as conn:
+                for table, column, ddl in targets:
+                    cols = [row[1] for row in conn.execute(
+                        text(f"PRAGMA table_info({table})")
+                    )]
+                    if column not in cols:
+                        conn.execute(text(
+                            f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"
+                        ))
+                        conn.commit()
+                        self.logger.info(f"迁移：{table} 表已添加列 {column}")
+        except Exception as e:
+            self.logger.warning(f"服务模式列迁移失败（忽略）: {e}")
 
     def init_db(self):
         """初始化渠道信息"""

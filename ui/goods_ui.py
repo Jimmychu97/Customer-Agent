@@ -6,6 +6,7 @@
 同步：针对选中商品调用 /glide/v2/mms/query/commit/detail 写入 goods_commit 表
 """
 from typing import Optional, List, Dict, Any
+from functools import partial
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                              QHeaderView, QAbstractItemView, QTableWidgetItem,
                              QSplitter)
@@ -17,6 +18,14 @@ from qfluentwidgets import (PrimaryPushButton, PushButton, TableWidget,
 from utils.logger_loguru import get_logger
 
 logger = get_logger("GoodsUI")
+
+# 服务模式四态：索引即库里的取值（3 = 未配置，与 core.service_mode.SERVICE_MODE_UNSET 一致）
+_SERVICE_MODE_ITEMS = ["卡券核销", "仅发货", "二选一兼容", "未配置"]
+
+
+def _service_mode_index(value) -> int:
+    """库里的服务模式 → 下拉框索引；缺失或非法一律落到「未配置」"""
+    return value if value in (0, 1, 2, 3) else 3
 
 
 # ──────────────────────────────────────────────
@@ -171,8 +180,9 @@ class GoodsManagementWidget(QWidget):
         layout.addWidget(BodyLabel("商品列表（来自知识库）"))
 
         self.goods_table = TableWidget()
-        self.goods_table.setColumnCount(4)
-        self.goods_table.setHorizontalHeaderLabels(["商品ID", "商品名称", "价格(元)", "已同步SKU"])
+        self.goods_table.setColumnCount(5)
+        self.goods_table.setHorizontalHeaderLabels(
+            ["商品ID", "商品名称", "价格(元)", "已同步SKU", "服务模式"])
         self.goods_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.goods_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.goods_table.itemSelectionChanged.connect(self._on_goods_selected)
@@ -180,6 +190,7 @@ class GoodsManagementWidget(QWidget):
         header = self.goods_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.goods_table)
         return container
 
@@ -297,6 +308,7 @@ class GoodsManagementWidget(QWidget):
                         "goods_name": p.goods_name,
                         "price": p.price or "",
                         "synced": str(p.goods_id) in synced_ids,
+                        "service_mode": _service_mode_index(getattr(p, "service_mode", None)),
                     }
                     for p in products
                 ]
@@ -308,6 +320,7 @@ class GoodsManagementWidget(QWidget):
             logger.error(f"加载商品列表失败: {e}")
 
     def _populate_goods_table(self):
+        """填充左表；第 4 列（服务模式）为下拉控件，不参与 QTableWidgetItem 循环"""
         self.goods_table.setRowCount(len(self._goods_data))
         for row, g in enumerate(self._goods_data):
             synced = g["synced"]
@@ -323,6 +336,60 @@ class GoodsManagementWidget(QWidget):
                 if col == 3 and synced:
                     item.setForeground(QColor("#27ae60"))
                 self.goods_table.setItem(row, col, item)
+            self.goods_table.setCellWidget(
+                row, 4, self._build_service_mode_combo(g["goods_id"], g.get("service_mode", 0)))
+
+    def _build_service_mode_combo(self, goods_id: str, service_mode: int) -> ComboBox:
+        """构造服务模式下拉框
+
+        Args:
+            goods_id: 商品ID
+            service_mode: 当前服务模式（0 卡券核销 / 1 仅发货 / 2 二选一 / 3 未配置）
+
+        Returns:
+            已设置当前值并绑定信号的 ComboBox
+        """
+        combo = ComboBox()
+        combo.addItems(_SERVICE_MODE_ITEMS)
+        # 先屏蔽信号设置当前值，再 connect，避免填充时触发写库
+        combo.blockSignals(True)
+        combo.setCurrentIndex(service_mode if 0 <= service_mode <= 3 else 3)
+        combo.blockSignals(False)
+        combo.currentIndexChanged.connect(
+            partial(self._on_service_mode_changed, goods_id))
+        return combo
+
+    def _on_service_mode_changed(self, goods_id: str, index: int):
+        """服务模式下拉框变更后写库
+
+        Args:
+            goods_id: 商品ID
+            index: 下拉框索引，与 0/1/2/3 四态一一对应
+        """
+        label = _SERVICE_MODE_ITEMS[index] if 0 <= index <= 3 else "未知"
+        try:
+            from database.db_manager import db_manager
+            from database.models import ProductKnowledge
+            with db_manager.get_session() as session:
+                product = session.query(ProductKnowledge).filter(
+                    ProductKnowledge.shop_id == self._selected_db_shop_id,
+                    ProductKnowledge.goods_id == int(goods_id),
+                ).first()
+                if not product:
+                    logger.error(f"服务模式写库失败：商品不存在 goods_id={goods_id}")
+                    self._show_error("设置失败", f"知识库中未找到商品 {goods_id}")
+                    return
+                product.service_mode = index
+                session.commit()
+            for item in self._goods_data:
+                if item["goods_id"] == goods_id:
+                    item["service_mode"] = index
+                    break
+            logger.info(f"服务模式已更新: goods_id={goods_id} service_mode={index}")
+            self._show_success("设置成功", f"商品 {goods_id} 服务模式已设为：{label}")
+        except Exception as e:
+            logger.error(f"保存服务模式失败 goods_id={goods_id}: {e}")
+            self._show_error("设置失败", str(e))
 
     # ──────── SKU 展示（来自 goods_commit）────────
 

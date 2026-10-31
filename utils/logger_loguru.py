@@ -37,7 +37,7 @@ except ImportError:
 
 # 默认配置
 DEFAULT_LOG_LEVEL = "info"
-DEFAULT_LOG_FILE = "logs/app.log"
+DEFAULT_LOG_FILE = os.environ.get("LOG_FILE", "logs/app.log")
 MAX_LOG_SIZE = "10 MB"
 BACKUP_COUNT = 5
 

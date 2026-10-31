@@ -69,6 +69,11 @@ cd Customer-Agent
 uv sync
 ```
 
+> 如果报 `invalid peer certificate: UnknownIssuer`（公司网络做了 SSL 解密），
+> 请不要改依赖，而是让 uv 使用本机证书库：项目根目录已经带有 `uv.toml`
+> （`system-certs = true`），确认该文件存在即可；也可以临时用
+> `uv sync --system-certs`。详见「常见问题」。
+
 ### 第五步：安装 Playwright 浏览器
 
 > **必须执行**，用于拼多多账号自动登录和 Cookie 刷新，缺少此步骤将导致 WebSocket 无法收到消息。
@@ -128,13 +133,77 @@ uv run python app.py
      | `apple` | 苹果设备 | 真心验机 API（需填「真心ServerId」） |
      | `android` | 安卓设备 | GSX 验机 API（需填「ServerId」） |
      | 其他/空 | 不识别，存 null | 默认走 GSX |
+
+   - **服务模式**（决定顾客下单后向他要什么）：
+
+     | 取值 | 含义 | AI 会向顾客要 |
+     |------|------|---------------|
+     | 卡券核销 | 该商品走卡券核销 | 卡券号 + 序列号/IMEI |
+     | 仅发货 | 无物流发货，拍下即发 | 只要序列号/IMEI，**绝不要卡券** |
+     | 二选一兼容 | 两种都支持 | 给卡券就核销、只给序列号就发货 |
+     | 未配置（默认） | 还没决定 | 按二选一处理，**不会**主动要卡券 |
+
+     新同步的商品默认「未配置」；已有商品保持原值，可在「商品管理」页逐项调整。
+     判定以「顾客这一单的商品」为准（订单卡 / 订单号 / 后台待发货单），
+     判定不出来才按二选一处理，所以仅发货商品不会被误要卡券。
 3. **录入客服知识**：在「知识库管理」页面添加客服知识（售前咨询话术、商品说明、售后政策等）
 4. **配置关键词**：在「关键词管理」页面配置触发转人工的关键词
 5. **启动自动回复**：在「自动回复」页面选择账号，点击启动
 
 ---
 
+## 抓包：采集订单查询与发货接口
+
+`scripts/capture_mms_api.py` 会打开一个**已登录**的商家后台真实浏览器窗口，由你亲手点击页面，
+脚本把期间所有发往 `mms.pinduoduo.com` 的 XHR/fetch/document 请求与响应录制下来，用于编写
+订单查询与发货接口（脚本自身不含任何硬编码接口路径，接口完全由抓包结果决定）。
+
+```cmd
+uv run python scripts/capture_mms_api.py --account 13676048541
+:: 非交互（脚本调用）：给一个停止信号文件，出现即收尾
+uv run python scripts/capture_mms_api.py --account 13676048541 --stop-file temp/_stop
+echo > temp/_stop
+```
+
+- 浏览器打开后按提示操作：① 点开【订单查询】看清待发货列表 ② 对其中一单点【发货】并完成 ③ 回到终端按 Enter 结束录制
+- `--out <目录>` 指定产物目录（默认 `temp/capture_<时间戳>`）；`--url` 改起始页；`--timeout <秒>` 改超时（默认 1800）
+- `--self-check` 只校验环境（账号目录 / 输出目录 / 可写 / Playwright / URL），不启动浏览器，可用于部署验收
+- 自动化/非交互运行：加 `--stop-file <路径>`，录制中途 `echo > <路径>` 即可结束；此时脚本不再等待 Enter，判断文件存在后自动删除，避免下次误触发
+- 浏览器就绪会单独打印一行 `READY <产物目录绝对路径>`（`flush=True`），可用它判断何时开始点击页面
+
+产物：
+
+- `raw.jsonl`：一行一条记录，字段为 `seq / ts / method / url / req_headers / req_body / status / resp_body / resource_type`，录制过程中边录边写
+- `summary.md`：接口清单（Method、去掉 query 的 URL、次数、状态码、疑似用途）+ 逐个接口详情（是否需要 anti-content、请求体与响应体样例、响应体顶层字段）
+
+读 `summary.md` 的方法：先在「接口清单」按「疑似用途」定位订单列表 / 订单详情 / 发货三类接口，
+再到「逐个接口详情」比对请求体与响应体字段，据此确定参数名与返回结构；响应体超过 200KB 会截断并标记 `truncated`。
+
+隐私说明：`req_headers` 中的 `cookie`、`anti-content`、`anti_content`、`authorization`、`token` 等敏感值已替换为 `***`；
+响应体按接口契约原样保留，抓包文件请勿外传。
+
+---
+
 ## 常见问题
+
+**Q：`uv run python app.py` 报 `invalid peer certificate: UnknownIssuer`？**
+
+现象：`Failed to download propcache==0.4.1` → `client error (Connect)` → `invalid peer certificate: UnknownIssuer`。
+
+原因：公司网络/杀毒软件对 HTTPS 做 TLS 中间人解密，其根证书只装在本机 Windows
+证书库里，而 uv 默认用内置的 Mozilla 根证书列表校验，因此不认识这张根证书。
+跟网络能不能通、镜像源坏没坏都没有关系（同一个地址用系统证书库校验是 200）。
+
+解决（任选其一）：
+- 项目根目录的 `uv.toml` 已配置 `system-certs = true`，直接 `uv sync` 即可；
+- 临时执行 `uv sync --system-certs` 或 `uv run --system-certs python app.py`；
+- 设置环境变量 `UV_SYSTEM_CERTS=1`。
+
+排查确认：
+```bash
+curl.exe --ssl-no-revoke -o NUL -w "%{http_code}\n" https://mirrors.aliyun.com/pypi/web/simple/   # 200
+curl.exe -o NUL -w "%{http_code}\n" https://mirrors.aliyun.com/pypi/web/simple/                    # 000（证书报错）
+```
 
 **Q：启动后收不到消息？**
 - 检查 Cookie 是否有效，在账号管理页重新登录

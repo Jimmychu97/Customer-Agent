@@ -62,6 +62,35 @@ def setup_playwright_browsers_path():
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_path)
     return browsers_path
 
+def _auto_start_all_accounts() -> None:
+    """启动后自动拉起所有「在线」账号的自动回复
+
+    不依赖自动回复页面实例（那是懒加载的），直接按数据库里的账号状态启动，
+    这样每次打开程序都不用手动点「启动自动回复」。
+    """
+    logger = _get_logger("App")
+    try:
+        from database.db_manager import db_manager
+        from ui.auto_reply.manager import auto_reply_manager
+
+        accounts = db_manager.get_all_accounts_with_details() or []
+        eligible = [
+            acc for acc in accounts
+            if acc.get("status") == 1 and not auto_reply_manager.is_running(acc)
+        ]
+        if not eligible:
+            logger.info("启动自动回复：没有需要启动的账号（未登录或已在运行）")
+            return
+
+        started = []
+        for acc in eligible:
+            if auto_reply_manager.start_auto_reply(acc):
+                started.append(acc.get("username"))
+        logger.info(f"启动自动回复：已自动开启 {len(started)}/{len(eligible)} 个账号 {started}")
+    except Exception as e:
+        logger.warning(f"启动自动回复失败: {e}")
+
+
 def main():
     """应用程序主函数"""
     # 设置 Playwright 浏览器路径
@@ -74,6 +103,21 @@ def main():
     # 创建主窗口
     logger = _get_logger("App")
     logger.info("应用程序启动...")
+
+    # Qt 槽函数里的异常只打到 stderr，GUI 没有控制台就等于「点了没反应」。
+    # 统一兜底：写日志（带堆栈）+ 弹窗，避免任何一次点击静默失败。
+    def _excepthook(exc_type, exc_value, exc_tb):
+        logger.opt(exception=(exc_type, exc_value, exc_tb)).error("未捕获异常（界面操作）")
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+
+            QMessageBox.critical(
+                None, "程序异常",
+                f"{exc_type.__name__}: {exc_value}\n\n详情见 logs/app.log")
+        except Exception:
+            pass
+
+    sys.excepthook = _excepthook
 
     # 部署自检：避免"新版调用 + 旧版被调"（例如 DatabaseManager 缺少 save_message）
     # 造成消息记录静默丢失（历史上表现为 WARNING: 'DatabaseManager' object has no attribute 'save_message'）
@@ -116,6 +160,9 @@ def main():
 
     # 将窗口设为应用级别的变量，防止被垃圾回收
     app.main_window = window
+
+    # 启动后自动拉起所有「在线」账号的自动回复，不需要每次手动点
+    QTimer.singleShot(3000, lambda: _auto_start_all_accounts())
 
     # 运行 Qt 事件循环
     sys.exit(app.exec())

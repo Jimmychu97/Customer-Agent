@@ -13,6 +13,7 @@ from Agent.CustomerAgent.tools import verify_voucher        # noqa: F401  — �
 from Agent.CustomerAgent.tools import use_voucher          # noqa: F401  — 注册核销码使用工具
 from Agent.CustomerAgent.tools import get_voucher_code     # noqa: F401  — 注册核销码生成工具
 from Agent.CustomerAgent.tools import coupon_query        # noqa: F401  — 注册优惠券查询工具
+from Agent.CustomerAgent.tools import ship_order          # noqa: F401  — 注册订单无物流发货工具
 
 __all__ = [
     "send_goods_link",
@@ -24,4 +25,5 @@ __all__ = [
     "use_voucher", 
     "get_voucher_code",
     "coupon_query",
+    "ship_order",
 ]

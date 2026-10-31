@@ -163,6 +163,7 @@ a = Analysis(
         "Channel.pinduoduo.utils.API.Set_up_online",
         "Channel.pinduoduo.utils.API.product_manager",
         "Channel.pinduoduo.utils.API.get_user_info",
+        "Channel.pinduoduo.utils.API.order_api",
         "utils.logger_loguru",
         "utils.logger_config",
         "utils.resource_manager",

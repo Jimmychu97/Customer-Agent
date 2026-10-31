@@ -63,3 +63,8 @@ CLAUDE.md
 *.exe
 *.pkg
 
+
+temp/
+data-gym-cache/
+jieba.cache
+.amazonq/

@@ -18,6 +18,77 @@ else:
     # 回退到用户目录
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(os.getenv("LOCALAPPDATA", ""), "ms-playwright")
 
+def _ensure_writable_temp_dir() -> None:
+    """确保 Playwright 的临时目录可写（登录前置条件）
+
+    应用可能被受限令牌 / 沙箱环境启动，这时 %TEMP% 不可写。Playwright 的 Node 驱动
+    在启动浏览器时会 mkdtemp 建 playwright-artifacts-XXXXXX，失败即抛
+    "EPERM: operation not permitted, mkdtemp ..."，表现为「登录失败，未能获取cookies」。
+    这里先探测系统临时目录，不可写就切到项目内的可写目录（Playwright 会把
+    os.environ 完整传给驱动，所以改 TMP/TEMP 即可生效）。
+    """
+    import tempfile
+
+    # 不探测系统临时目录：受限 ACL 下 mkdir 可能长时间阻塞而不是立即报错，
+    # 导入期卡死比“临时目录不可写”严重得多。
+    # 项目目录本身一定是可写的（日志和数据库都写在这里），直接用文件探测它。
+    fallback = app_dir / "temp" / "playwright"
+    try:
+        fallback.mkdir(parents=True, exist_ok=True)
+        probe = os.path.join(str(fallback), f".write_probe_{os.getpid()}")
+        with open(probe, "wb") as fh:
+            fh.write(b"1")
+        os.remove(probe)
+    except Exception as e:
+        get_logger("Pdd_login_init").error(
+            f"项目内 Playwright 临时目录不可用（登录可能失败）: {e}")
+        return
+
+    global _PW_TEMP_DIR
+    _PW_TEMP_DIR = str(fallback)
+    get_logger("Pdd_login_init").info(f"Playwright 临时目录: {_PW_TEMP_DIR}")
+
+
+_PW_TEMP_DIR = None
+_ensure_writable_temp_dir()
+
+
+class _PwTempEnv:
+    """仅在启动 Playwright 驱动的那一刻把 TMPDIR/TEMP/TMP 指向可写目录
+
+    Playwright 的 Node 驱动启动时会拷贝 os.environ（get_driver_env），
+    之后浏览器进程继承驱动环境，所以这里临时改、立刻还原，
+    不会污染应用进程里其它组件对临时目录的使用。
+    """
+
+    _KEYS = ("TMPDIR", "TEMP", "TMP")
+
+    def __enter__(self):
+        self._saved = {k: os.environ.get(k) for k in self._KEYS}
+        if _PW_TEMP_DIR:
+            for k in self._KEYS:
+                os.environ[k] = _PW_TEMP_DIR
+        return self
+
+    def __exit__(self, *exc):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return False
+
+
+async def _start_playwright():
+    """启动 Playwright 驱动（使用可写的临时目录）
+
+    注意必须在这里 await：start() 返回协程，驱动是在 await 时才 spawn 的，
+    若把协程带出 with 块，环境变量已被还原，覆盖就失效了。
+    """
+    with _PwTempEnv():
+        return await async_playwright().start()
+
+
 from http import cookies
 import requests
 import json
@@ -84,8 +155,10 @@ class PDDLogin():
         """
         playwright = None
         context = None
+        page = None
         try:
-            playwright = await async_playwright().start()
+            self.logger.info(f"[登录] 启动浏览器驱动 name={self.name} headless={headless}")
+            playwright = await _start_playwright()
 
             user_data_dir = str(app_dir / "user_data" / self.name)
             self.logger.debug(f"使用用户数据目录: {user_data_dir}")
@@ -109,6 +182,7 @@ class PDDLogin():
             context = await playwright.chromium.launch_persistent_context(
                 user_data_dir, **launch_kwargs
             )
+            self.logger.info("[登录] 浏览器已打开，正在打开发布页")
 
             page = await context.new_page()
 
@@ -131,6 +205,7 @@ class PDDLogin():
             await page.fill("input[type='password']", self.password)
 
             await page.click("button:has-text('登录')")
+            self.logger.info("[登录] 已提交账号密码，等待后台跳转（最长 30 秒）")
 
             await page.wait_for_function(
                 "() => document.title === '拼多多 商家后台' || document.title === '首页' || document.title === '订单查询'",
@@ -140,10 +215,18 @@ class PDDLogin():
             cookies_list = await context.cookies()
             cookies_dict = {cookie.get('name', ''): cookie.get('value', '') for cookie in cookies_list if cookie.get('name')}
             cookies_json = json.dumps(cookies_dict)
+            self.logger.info(f"[登录] 登录成功 name={self.name}，已取得 {len(cookies_dict)} 个 cookie")
             return cookies_json
 
         except Exception as e:
-            self.logger.error(f"登录失败: {str(e)}")
+            # 登录是浏览器自动化：失败必须带出「当时停在哪」，否则只剩一句无用的「登录失败」
+            where = ""
+            if page is not None:
+                try:
+                    where = f" url={page.url!r} title={(await page.title())!r}"
+                except Exception:
+                    where = " url=取不到"
+            self.logger.opt(exception=True).error(f"[登录] 失败 name={self.name}: {e}{where}")
             return False
         finally:
             if context:
@@ -169,7 +252,7 @@ class PDDLogin():
         playwright = None
         context = None
         try:
-            playwright = await async_playwright().start()
+            playwright = await _start_playwright()
 
             user_data_dir = str(app_dir / "user_data" / self.name)
             self.logger.debug(f"使用用户数据目录刷新cookies: {user_data_dir}")

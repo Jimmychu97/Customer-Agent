@@ -2,10 +2,17 @@ from ..base_request import BaseRequest
 from typing import Dict, Any
 from collections import defaultdict
 from threading import Lock
+import random
 
 # 全局：记录每个 (shop_id, recipient_uid, content) 的发送次数
 _send_counter: Dict[tuple, int] = defaultdict(int)
 _send_counter_lock = Lock()
+
+
+def _invisible_token() -> str:
+    """生成对客户不可见的随机零宽串（16 位），用于绕过服务端的重复消息拦截"""
+    bits = format(random.getrandbits(16), "b")
+    return "".join("\u200b" if b == "1" else "\u200c" for b in bits)
 
 
 class SendMessage(BaseRequest):
@@ -18,51 +25,83 @@ class SendMessage(BaseRequest):
             raise ValueError("找不到指定的账户信息")
 
     def _dedup_content(self, recipient_uid: str, content: str) -> str:
-        """每条消息都加序号，避免服务端去重"""
+        """每条消息都加一个对客户不可见的变体，避免服务端去重
+
+        旧实现加 "1. " 前缀，客户在聊天里会真的看到序号；改成追加零宽字符。
+        """
         key = (self.shop_id, str(recipient_uid), content)
         with _send_counter_lock:
             _send_counter[key] += 1
-            count = _send_counter[key]
-        return f"{count}. {content}"
+        return f"{content}{_invisible_token()}"
+
+    @staticmethod
+    def _judge_send_result(result) -> tuple:
+        """判断平台是否真的收下了消息
+
+        平台会返回 success=true 但 result.result="fail" + error_code（例如 40013 重复消息），
+        旧实现只特判 10002，这类失败被当成了发送成功 —— 日志说成功、客户却收不到。
+        """
+        if not result or result.get("success") is not True:
+            return False, {"error_code": None, "error_msg": "接口未返回 success"}
+        body = result.get("result")
+        if not isinstance(body, dict):
+            return False, {"error_code": None, "error_msg": "响应缺少 result"}
+        state = body.get("result")
+        error_code = body.get("error_code")
+        if state == "ok" and not error_code:
+            return True, {"msg_id": body.get("msg_id")}
+        return False, {
+            "error_code": error_code,
+            "error_msg": body.get("error") or body.get("error_msg") or state,
+        }
 
     def send_text(self, recipient_uid, message_content):
         """
         发送文本消息
         """
         url = "https://mms.pinduoduo.com/plateau/chat/send_message"
-        data = {
-            "data": {
-                "cmd": "send_message",
-                "request_id": self.generate_request_id(),
-                "message": {
-                    "to": {
-                        "role": "user",
-                        "uid": recipient_uid
-                    },
-                    "from": {
-                        "role": "mall_cs"
-                    },
-                    "content": self._dedup_content(recipient_uid, message_content),
-                    "msg_id": None,
-                    "type": 0,
-                    "is_aut": 0,
-                    "manual_reply": 1,
-                },
-            },
-            "client": "WEB"
-        }
 
-        result = self.post(url, json_data=data)
-        if result and result.get("success") == True:
-            if result.get("result", {}).get("error_code") == 10002:
-                error_msg = result.get('result', {}).get('error')
-                self.logger.error(f"发送文本消息失败: {error_msg}")
-                return {"success": False, "error_msg": error_msg}
-            else:
+        last_error = {}
+        for attempt in (1, 2):
+            content = self._dedup_content(recipient_uid, message_content)
+            data = {
+                "data": {
+                    "cmd": "send_message",
+                    "request_id": self.generate_request_id(),
+                    "message": {
+                        "to": {
+                            "role": "user",
+                            "uid": recipient_uid
+                        },
+                        "from": {
+                            "role": "mall_cs"
+                        },
+                        "content": content,
+                        "msg_id": None,
+                        "type": 0,
+                        "is_aut": 0,
+                        "manual_reply": 1,
+                    },
+                },
+                "client": "WEB"
+            }
+
+            result = self.post(url, json_data=data)
+            ok, info = self._judge_send_result(result)
+            if ok:
                 return result
-        else:
-            self.logger.error(f"发送文本消息失败: {result}")
-            return None
+
+            last_error = info
+            # 40013 = 平台判定「重复消息」，换一个不可见变体重试一次
+            if info.get("error_code") == 40013 and attempt == 1:
+                self.logger.warning(f"发送被判定为重复消息，换变体重试: {str(message_content)[:20]!r}")
+                continue
+            break
+
+        self.logger.error(
+            f"发送文本消息失败 error_code={last_error.get('error_code')} error={last_error.get('error_msg')}"
+        )
+        return {"success": False, **last_error}
 
  
         
@@ -95,9 +134,14 @@ class SendMessage(BaseRequest):
         }
 
         result = self.post(url, json_data=data)
-        if result:
+        ok, info = self._judge_send_result(result)
+        if ok:
             self.logger.debug(f"发送图片消息成功: {result}")
             return result
+        self.logger.error(
+            f"发送图片消息失败 error_code={info.get('error_code')} error={info.get('error_msg')}"
+        )
+        return {"success": False, **info}
 
 
     def send_mallGoodsCard(self, recipient_uid, goods_id, biz_type: int = 2):

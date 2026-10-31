@@ -1,0 +1,5 @@
+# 使用本机（Windows）证书库校验 TLS，而不是 uv 内置的 Mozilla 根证书列表。
+# 公司网络里的 SSL 解密网关 / 杀毒软件会把下载流量做中间人解密，
+# 它的根证书只安装在本机系统证书库中，uv 内置根证书列表里没有，
+# 于是会报：invalid peer certificate: UnknownIssuer。
+system-certs = true

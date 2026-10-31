@@ -93,6 +93,8 @@ class ProductKnowledge(Base):
     created_at = Column(DateTime, default=datetime.now, comment='创建时间')
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='更新时间')
     last_extracted_at = Column(DateTime, default=datetime.now, comment='上次提取时间')
+    service_mode = Column(Integer, default=3, nullable=False,
+                          comment='服务模式：0-卡券核销，1-仅发货，2-二选一兼容，3-未配置')
 
     # 关联关系
     shop = relationship('Shop', backref='product_knowledge')
@@ -232,6 +234,8 @@ class Order(Base):
     status = Column(Integer, default=0, nullable=False,
                     comment='状态：0-待核销，1-核销成功，2-核销失败，3-已过期')
     created_at = Column(DateTime, default=datetime.now, nullable=False, comment='创建时间')
+    order_sn = Column(String(100), nullable=True, index=True, comment='拼多多订单号（发货流程使用）')
+    service_mode = Column(Integer, nullable=True, comment='本单实际执行的服务模式：1-发货，2-卡券核销')
 
     def __repr__(self):
         return f"<Order(id={self.id}, shop_id='{self.shop_id}', session_id='{self.session_id}', sn_imei='{self.sn_imei}', status={self.status})>"
