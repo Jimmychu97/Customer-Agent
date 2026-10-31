@@ -161,8 +161,14 @@ def main():
     # 将窗口设为应用级别的变量，防止被垃圾回收
     app.main_window = window
 
-    # 启动后自动拉起所有「在线」账号的自动回复，不需要每次手动点
-    QTimer.singleShot(3000, lambda: _auto_start_all_accounts())
+    # 启动后是否自动拉起「在线」账号的自动回复：由 config 的 auto_reply.autostart 控制，默认关闭。
+    # 关闭后照样可以在「自动回复」页手动启动；这样避免一开机就自动连平台，
+    # 也避免本机与服务器同时在线把同一个号互相顶掉。
+    if _app_config.get("auto_reply.autostart", False):
+        logger.info("auto_reply.autostart=true，3 秒后自动拉起在线账号的自动回复")
+        QTimer.singleShot(3000, lambda: _auto_start_all_accounts())
+    else:
+        logger.info("auto_reply.autostart=false（默认关闭），不自动启动自动回复，请在界面手动开启")
 
     # 运行 Qt 事件循环
     sys.exit(app.exec())
