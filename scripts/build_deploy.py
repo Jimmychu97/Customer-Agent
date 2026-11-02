@@ -34,7 +34,8 @@ ROOT_FILES = [
 # 服务器上仍用得着的脚本（自测脚本默认不带）
 SCRIPT_FILES = [
     "install_playwright.py", "doctor.py", "relogin_account.py", "show_messages.py",
-    "capture_mms_api.py", "check_order_api.py", "build_exe.py", "build_win_exe.py",
+    "capture_mms_api.py", "check_order_api.py", "check_goods_config.py",
+    "build_exe.py", "build_win_exe.py",
     "agent_customer.spec", "version_info.txt", "README.md",
 ]
 
