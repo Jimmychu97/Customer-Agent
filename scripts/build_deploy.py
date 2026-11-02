@@ -28,7 +28,7 @@ SOURCE_DIRS = ["Agent", "bridge", "Channel", "core", "database", "Message", "ui"
 # 根目录单文件
 ROOT_FILES = [
     "app.py", "config.py", "pyproject.toml", "uv.lock", "uv.toml",
-    ".python-version", "README.md", "启动.bat", ".gitignore",
+    ".python-version", "README.md", "启动.bat", "一键更新到运行目录.bat", ".gitignore",
 ]
 
 # 服务器上仍用得着的脚本（自测脚本默认不带）
