@@ -217,7 +217,7 @@ def scenario_merge_fallback():
 
 
 def scenario_page_size():
-    print("Q9 按订单号查详情：pageSize 用 50，平台嫌大自动降到 20（线上 100 恒失败）")
+    print("Q9 按订单号查详情：只比最新前 10 笔，平台嫌大自动降到 5")
     anti_content.store(ACCOUNT, "SIG_A")
     too_big = {"success": False, "errorCode": 4000000,
                "errorMsg": "单页数据量过大或非法"}
@@ -228,10 +228,12 @@ def scenario_page_size():
         result = api.get_order_by_sn(ORDER_SN)
         sizes = [c["payload"].get("pageSize") for c in api.calls
                  if c["url"] == api.ORDER_LIST_URL]
-        check("Q9 首次 pageSize=50（不是 100）", sizes and sizes[0] == 50, sizes)
-        check("Q9 平台嫌大后降到 20 重试", 20 in sizes, sizes)
+        check("Q9 首次 pageSize=10（不是 100）", sizes and sizes[0] == 10, sizes)
+        check("Q9 平台嫌大后降到 5 重试", 5 in sizes, sizes)
         check("Q9 降级后命中订单并带出 spec",
               (result.get("order") or {}).get("spec") == SPEC, result)
+        check("Q9 只翻 1 页（ORDER_DETAIL_MAX_PAGES=1）",
+              len(sizes) <= 2 and oa.DETAIL_MAX_PAGES == 1, (sizes, oa.DETAIL_MAX_PAGES))
     finally:
         anti_content.invalidate(ACCOUNT)
 
@@ -248,6 +250,26 @@ def scenario_pending_rule():
     check("Q10 只有中文状态也能识别待发货",
           text_only.get("pending_shipment") is True, text_only)
     check("Q10 已发货不会被误判", shipped.get("pending_shipment") is False, shipped)
+
+
+def scenario_not_in_latest():
+    print("Q11 最新几笔里没有该单号 → 合并发货页再比一次")
+    anti_content.store(ACCOUNT, "SIG_A")
+    other = {"success": True, "result": {"totalItemNum": 1, "pageItems": [{
+        "order_sn": "261102-000000000000001", "goods_id": "1", "spec": "别的规格",
+        "shipping_status": 1, "pay_status": 2, "order_status_str": "已发货"}]}}
+    papers = [other, merge_ok()]
+    api = FakeApi(papers)
+    api._ensure_anti_content = lambda force=False: None
+    try:
+        result = api.get_order_by_sn(ORDER_SN)
+        check("Q11 合并发货页命中", result.get("success") is True, result)
+        check("Q11 命中项带 spec", (result.get("order") or {}).get("spec") == SPEC, result)
+        check("Q11 只在最新一页 + 合并页各查一次",
+              len([c for c in api.calls if c["url"] == api.ORDER_LIST_URL]) == 1,
+              [c["url"] for c in api.calls])
+    finally:
+        anti_content.invalidate(ACCOUNT)
 
 
 def scenario_background():
@@ -279,6 +301,7 @@ def main():
     scenario_retry()
     scenario_merge_fallback()
     scenario_page_size()
+    scenario_not_in_latest()
     scenario_pending_rule()
     scenario_background()
     print("\n结果: %d 通过, %d 失败" % (_results["pass"], _results["fail"]))

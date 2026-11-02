@@ -6,6 +6,7 @@
 - recentOrderList:  订单列表查询（支持分页，接口无独立详情端点）
 - shipping/single:  无物流（虚拟商品）发货
 """
+import os
 import time as _time
 from typing import Dict, Any, List, Optional
 
@@ -18,12 +19,21 @@ PAY_STATUS_PAID = 2
 # 无物流发货默认虚拟发货内容（抓包 seq=462 原值："5" + 反馈文案）
 DEFAULT_VIRTUAL_CONTENT = ["5", "序列号查询反馈内容,在聊天窗口。请注意查收~"]
 
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except Exception:
+        return default
+
+
 # 分页查询上限
 ORDER_PAGE_SIZE_MAX = 100
-DETAIL_MAX_PAGES = 5
-# 按订单号翻页查详情时的页大小：实测 50 可用，100 会被平台回「单页数据量过大或非法」
-DETAIL_PAGE_SIZE = 50
-DETAIL_PAGE_SIZE_FALLBACK = 20
+# 按订单号查详情：只比「最新前 10 笔」就够（店铺单量小，一页就够用，也不容易被平台拒）。
+# 平台对 pageSize=100 固定回「单页数据量过大或非法」，50 可用，10 最稳。
+DETAIL_MAX_PAGES = _env_int("ORDER_DETAIL_MAX_PAGES", 1)
+DETAIL_PAGE_SIZE = _env_int("ORDER_DETAIL_PAGE_SIZE", 10)
+DETAIL_PAGE_SIZE_FALLBACK = _env_int("ORDER_DETAIL_PAGE_SIZE_FALLBACK", 5)
 
 # 单笔发货成功码：orderShipResultList[].shippingResultCode（实测成功值为 100）
 SHIP_RESULT_CODE_SUCCESS = 100
@@ -362,6 +372,16 @@ class MmsOrderAPI(BaseRequest):
                 # 本页不足一页，说明已到末尾，无需继续翻页
                 if len(orders) < page_size:
                     break
+
+            # 最新几笔里没有：再用「合并发货页」接口比一次（它固定只返回待发货单，
+            # 带 goods_id/spec；正常新单都能在这里命中，且不受 recentOrderList 风控影响）
+            merge = self.list_merge_shipping_orders(page_no=1)
+            for order in (merge.get("orders") or []):
+                if order.get("order_sn") == order_sn:
+                    self.logger.info(
+                        f"[订单查询] 最新订单里没有，合并发货页命中 order_sn={order_sn} "
+                        f"spec={order.get('spec')!r}")
+                    return {"success": True, "order": order, "error_msg": ""}
 
             self.logger.warning(f"订单未找到 order_sn={order_sn} 回溯天数={begin_days}")
             return {"success": False, "order": None,
