@@ -142,7 +142,7 @@ class ShipMixin:
 
         # 验机前置：序列号在验机库查不到就绝不发货。
         # 发货不可回滚，而报告是发货后必须给的——查不到就没有补救余地，只能先拦住。
-        query_cfg, spec, spec_count = self._ship_query_config(goods_id, spec or "")
+        query_cfg, spec, spec_count, verify_goods = self._ship_query_config(goods_id, spec or "")
         server_id = query_cfg["server_id"]
         zhenxin_sid = query_cfg["zhenxin_server_id"]
         device_type = query_cfg["device_type"]
@@ -156,9 +156,9 @@ class ShipMixin:
         # 验机商品、但这次连规格都没拿到（客户只发了订单号/订单详情被风控）：发货前就拦住。
         # 先发货再要规格的后果是报告永远出不来——线上 17:28 就是这么丢的报告。
         # 注意：规格有值只是没配编码（商家漏配）不拦，照常发货并在报告链上明确告知。
-        if spec_count and not spec and not report_query_enabled:
+        if spec_count > 1 and not spec and not report_query_enabled:
             self.logger.warning(
-                f"[发货] 验机商品缺少规格，发货前拦下 order_sn={order_sn} "
+                f"[发货] 多规格商品未拿到规格，发货前拦下 order_sn={order_sn} "
                 f"goods_id={goods_id} spec={spec!r} specs={spec_count} order_id={order_id}")
             return self._ship_spec_needed_text(order_sn, spec_count), _SHIP_ERROR
 
@@ -238,7 +238,8 @@ class ShipMixin:
             note, _matched = self._pending_ship_note(shop_id, user_id)
             self.logger.warning(
                 f"[发货] 未匹配到验机服务，跳过查询，改要订单核对 "
-                f"order_sn={order_sn} goods_id={goods_id} spec={spec!r}"
+                f"order_sn={order_sn} goods_id={goods_id} spec={spec!r} "
+                f"specs={spec_count} 验机商品={verify_goods}"
             )
             return (
                 success_text + "\n\n"
@@ -285,16 +286,41 @@ class ShipMixin:
             self.logger.debug(f"[发货] 读取商品规格失败 goods_id={goods_id}: {e}")
             return 0
 
+    def _is_verify_goods(self, goods_id) -> bool:
+        """这个商品是不是「验机服务」商品
+
+        判据两条任一成立：
+          1. goods_commit 里有规格行（正常同步过 SKU）；
+          2. 商品知识库里有这个商品（服务模式 0/2 卖的都是验机服务）。
+        线上 976314624020 属于第 2 种：SKU 没同步、规格行缺失，但商品确实卖验机服务；
+        只看第 1 条会把它当「纯发货商品」放行，于是又出现「发货成功却没报告」。
+        """
+        goods = str(goods_id or "")
+        if not goods:
+            return False
+        if self._product_spec_count(goods) > 0:
+            return True
+        try:
+            from database import db_manager
+            from database.models import ProductKnowledge
+
+            with db_manager.session_scope() as session:
+                row = session.query(ProductKnowledge.id).filter(
+                    ProductKnowledge.goods_id == int(goods)).first()
+            return row is not None
+        except Exception:
+            return False
+
     def _ship_query_config(self, goods_id, spec: str):
-        """解析发货要用的验机口径：返回 (cfg, spec, spec_count)
+        """解析发货要用的验机口径：返回 (cfg, spec, spec_count, is_verify_goods)
 
         spec 缺失时**只**用「商品唯一规格」兜底，多规格绝不猜：客户买的是哪个套餐，
-        报告字段就得对得上。spec_count 用来区分两件事：
-          - spec_count > 0 且解析不到编码 → 客户还没说清买的是哪个套餐（先别发货）
-          - spec_count == 0             → 这个商品本来就不是验机商品（照常发货）
+        报告字段就得对得上。判定为验机商品却解析不到编码时，调用方必须先别发货：
+          - spec_count > 0 且解析不到编码 → 客户还没说清买的是哪个套餐
+          - 是验机商品（含只在商品知识库里的）→ 必须先核对查询项目再发
+          - 不是验机商品（纯发货）        → 照常发货
 
-        线上 17:28 那单就是前者：订单详情被风控拿不到、客户只发了订单号，spec 为空
-        却先把货发了，于是报告永远出不来（发货不可回滚，客户也不会再补一遍订单卡片）。
+        线上 17:28 / 21:56 两单都是「先发货、报告永远补不出来」，根因就在这里放行太早。
         """
         goods = str(goods_id or "")
         empty = {"server_id": None, "zhenxin_server_id": None, "device_type": None}
@@ -316,7 +342,8 @@ class ShipMixin:
                 self.logger.info(
                     f"[发货] 规格缺失，按商品唯一规格兜底 goods_id={goods} "
                     f"spec={resolved!r} has_code={has_code}")
-        return cfg, resolved, spec_count
+        verify_goods = bool(spec_count) or self._is_verify_goods(goods)
+        return cfg, resolved, spec_count, verify_goods
 
     async def _ship_with_confirm(self, sn: str, order_sn: str, order_id: Optional[int],
                                  shop_id: str, user_id: str, from_uid: str,
@@ -342,9 +369,12 @@ class ShipMixin:
 
         # 验机商品但没拿到规格：连"确认"都别发——客户确认了也发不了货（报告对不上），
         # 先要订单卡片/套餐名，把查询项目核对清楚再走确认 → 发货 → 出报告。
-        cfg, resolved_spec, spec_count = self._ship_query_config(goods_id, spec or "")
+        cfg, resolved_spec, spec_count, verify_goods = self._ship_query_config(goods_id, spec or "")
         missing_spec = not (spec or "").strip() and not resolved_spec
-        if spec_count and missing_spec and not (cfg.get("server_id") or cfg.get("zhenxin_server_id")):
+        # 只有「多规格但客户没说买哪个」才拦：这种情况问一句就能解决。
+        # 规格表里一条都没有（SKU 没同步）时拦下来也没人能回答，照常发货 + 明确告知没报告。
+        if (spec_count > 1 and missing_spec
+                and not (cfg.get("server_id") or cfg.get("zhenxin_server_id"))):
             self.logger.warning(
                 f"[发货] 验机商品没拿到规格，先不发货 order_sn={order_sn!r} "
                 f"goods_id={goods_id} spec={spec!r} specs={spec_count} from_uid={from_uid}")

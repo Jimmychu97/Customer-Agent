@@ -21,6 +21,9 @@ DEFAULT_VIRTUAL_CONTENT = ["5", "序列号查询反馈内容,在聊天窗口。�
 # 分页查询上限
 ORDER_PAGE_SIZE_MAX = 100
 DETAIL_MAX_PAGES = 5
+# 按订单号翻页查详情时的页大小：实测 50 可用，100 会被平台回「单页数据量过大或非法」
+DETAIL_PAGE_SIZE = 50
+DETAIL_PAGE_SIZE_FALLBACK = 20
 
 # 单笔发货成功码：orderShipResultList[].shippingResultCode（实测成功值为 100）
 SHIP_RESULT_CODE_SUCCESS = 100
@@ -35,6 +38,15 @@ _RATE_LIMIT_HINTS = ("40002", "太过频繁")
 def _is_rate_limited(code=None, msg: str = "") -> bool:
     text = f"{code or ''} {msg or ''}"
     return any(hint in text for hint in _RATE_LIMIT_HINTS)
+
+
+# 平台嫌单页太大时的报错（pageSize=100 会踩到）
+_PAGE_SIZE_HINTS = ("单页数据量过大", "数据量过大", "非法")
+
+
+def _is_page_size_invalid(msg: str = "") -> bool:
+    text = str(msg or "")
+    return any(hint in text for hint in _PAGE_SIZE_HINTS)
 
 
 class MmsOrderAPI(BaseRequest):
@@ -121,10 +133,11 @@ class MmsOrderAPI(BaseRequest):
         """把响应 pageItems 中的原始订单裁剪为业务字典，pending_shipment 由判定规则算出"""
         shipping_status = item.get("shipping_status")
         pay_status = item.get("pay_status")
+        status_str = str(item.get("order_status_str") or "")
         return {
             "order_sn": item.get("order_sn"),
             "order_status": item.get("order_status"),
-            "order_status_str": item.get("order_status_str"),
+            "order_status_str": status_str,
             "shipping_status": shipping_status,
             "pay_status": pay_status,
             "goods_id": item.get("goods_id"),
@@ -136,8 +149,11 @@ class MmsOrderAPI(BaseRequest):
             "thumb_url": item.get("thumb_url"),
             "no_need_ship": item.get("no_need_ship"),
             "tracking_number": item.get("tracking_number"),
+            # 数字口径优先；平台偶尔只给中文状态（线上出现「原始 50 笔 / 待发货 0 笔」
+            # 而客户明明刚下单），此时按状态文案兜底，避免待发货被漏判。
             "pending_shipment": (
-                shipping_status == SHIPPING_STATUS_UNSHIPPED and pay_status == PAY_STATUS_PAID
+                (shipping_status == SHIPPING_STATUS_UNSHIPPED and pay_status == PAY_STATUS_PAID)
+                or ("待发货" in status_str)
             ),
         }
 
@@ -203,6 +219,7 @@ class MmsOrderAPI(BaseRequest):
         """裁剪合并发货页接口返回的订单字段（该接口固定只返回待发货订单）"""
         shipping_status = item.get("shipping_status")
         pay_status = item.get("pay_status")
+        status_str = str(item.get("order_status_str") or "")
         return {
             "order_sn": item.get("order_sn"),
             "goods_id": item.get("goods_id"),
@@ -212,12 +229,14 @@ class MmsOrderAPI(BaseRequest):
             "order_amount": item.get("order_amount"),
             "order_time": item.get("order_time"),
             "order_status": item.get("order_status"),
+            "order_status_str": status_str,
             "shipping_status": shipping_status,
             "pay_status": pay_status,
             "nickname": item.get("nickname"),
             "receive_name": item.get("receive_name"),
             "pending_shipment": (
-                shipping_status == SHIPPING_STATUS_UNSHIPPED and pay_status == PAY_STATUS_PAID
+                (shipping_status == SHIPPING_STATUS_UNSHIPPED and pay_status == PAY_STATUS_PAID)
+                or ("待发货" in status_str)
             ),
         }
 
@@ -282,6 +301,11 @@ class MmsOrderAPI(BaseRequest):
         """
         按订单号查找订单（平台无独立详情接口，靠列表分页精确匹配）
 
+        **页大小坑**：recentOrderList 对 pageSize=100 固定回「单页数据量过大或非法」，
+        而 50 实测可用。旧代码用 ORDER_PAGE_SIZE_MAX(=100) 翻页，于是「按订单号查详情」
+        永远失败 → 发货拿不到 goods_id/spec → 报告出不来（线上 21:56 就是这样）。
+        这里用 50 起步，平台仍嫌大就自动降到 20 再试。
+
         Args:
             order_sn:   订单号，如 "261028-296296138371626"
             begin_days: 回溯天数
@@ -296,26 +320,38 @@ class MmsOrderAPI(BaseRequest):
             now = int(_time.time())
             begin_time = now - max(1, begin_days) * 24 * 3600
 
+            page_size = DETAIL_PAGE_SIZE
             for page_num in range(1, DETAIL_MAX_PAGES + 1):
                 result = self.list_orders(
                     page_num=page_num,
-                    page_size=ORDER_PAGE_SIZE_MAX,
+                    page_size=page_size,
                     begin_time=begin_time,
                     end_time=now,
                 )
                 if not result.get("success"):
-                    # recentOrderList 被风控时，用「合并发货页」接口兜底：
-                    # 该接口不受同一套 40002 限制，且返回里带 goods_id / spec，
-                    # 正好是发货要用的查询项目（线上就是这里拿不到 spec 才丢了报告）。
-                    merge = self.list_merge_shipping_orders(page_no=1)
-                    for order in (merge.get("orders") or []):
-                        if order.get("order_sn") == order_sn:
-                            self.logger.info(
-                                f"[订单查询] 订单列表被风控，改用合并发货页命中 order_sn={order_sn} "
-                                f"spec={order.get('spec')!r}")
-                            return {"success": True, "order": order, "error_msg": ""}
-                    return {"success": False, "order": None,
-                            "error_msg": result.get("error_msg") or "查询订单失败"}
+                    err = str(result.get("error_msg") or "")
+                    if _is_page_size_invalid(err) and page_size > DETAIL_PAGE_SIZE_FALLBACK:
+                        # 平台嫌单页太大：降一档再打一次
+                        page_size = DETAIL_PAGE_SIZE_FALLBACK
+                        self.logger.warning(
+                            f"[订单查询] 平台拒绝 pageSize={DETAIL_PAGE_SIZE}（{err}），"
+                            f"降到 {page_size} 重试 order_sn={order_sn}")
+                        result = self.list_orders(
+                            page_num=page_num, page_size=page_size,
+                            begin_time=begin_time, end_time=now)
+                    if not result.get("success"):
+                        # recentOrderList 被风控时，用「合并发货页」接口兜底：
+                        # 该接口不受同一套 40002 限制，且返回里带 goods_id / spec，
+                        # 正好是发货要用的查询项目（线上就是这里拿不到 spec 才丢了报告）。
+                        merge = self.list_merge_shipping_orders(page_no=1)
+                        for order in (merge.get("orders") or []):
+                            if order.get("order_sn") == order_sn:
+                                self.logger.info(
+                                    f"[订单查询] 订单列表不可用，改用合并发货页命中 "
+                                    f"order_sn={order_sn} spec={order.get('spec')!r}")
+                                return {"success": True, "order": order, "error_msg": ""}
+                        return {"success": False, "order": None,
+                                "error_msg": result.get("error_msg") or "查询订单失败"}
 
                 orders = result.get("orders") or []
                 for order in orders:
@@ -324,7 +360,7 @@ class MmsOrderAPI(BaseRequest):
                         return {"success": True, "order": order, "error_msg": ""}
 
                 # 本页不足一页，说明已到末尾，无需继续翻页
-                if len(orders) < ORDER_PAGE_SIZE_MAX:
+                if len(orders) < page_size:
                     break
 
             self.logger.warning(f"订单未找到 order_sn={order_sn} 回溯天数={begin_days}")

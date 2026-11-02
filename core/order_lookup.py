@@ -235,6 +235,15 @@ def _fetch_pending_orders(
                 f"[订单查询] shop={key} 订单列表命中待发货 {len(orders)} 笔"
                 f"（原始 {len(raw_orders)} 笔）"
             )
+            # 有订单却没有一笔被判成待发货：把前几笔的判定字段打出来，下一轮就能定位
+            # 是「字段口径变了」还是「单没在第一页」（线上 21:5x 就是这种 0 笔）
+            if raw_orders and not orders:
+                sample = [
+                    {k: o.get(k) for k in ("order_sn", "shipping_status", "pay_status",
+                                           "order_status_str", "spec")}
+                    for o in raw_orders[:3]
+                ]
+                logger.info(f"[订单查询] shop={key} 待发货判定样本 {sample}")
         else:
             error_msg = str(result.get("error_msg") or "")
             logger.warning(f"[订单查询] shop={key} 订单列表查询失败: {error_msg}")

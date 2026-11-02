@@ -74,7 +74,8 @@ class FakeApi(oa.MmsOrderAPI):
         self.calls = []
 
     def post(self, url, json_data=None, headers=None):
-        self.calls.append({"url": url, "anti": (headers or {}).get("anti-content")})
+        self.calls.append({"url": url, "anti": (headers or {}).get("anti-content"),
+                           "payload": dict(json_data or {})})
         return self._posts.pop(0) if self._posts else {}
 
     def _ensure_anti_content(self, force=False):  # 测试里不真去开浏览器
@@ -215,6 +216,40 @@ def scenario_merge_fallback():
         anti_content.invalidate(ACCOUNT)
 
 
+def scenario_page_size():
+    print("Q9 按订单号查详情：pageSize 用 50，平台嫌大自动降到 20（线上 100 恒失败）")
+    anti_content.store(ACCOUNT, "SIG_A")
+    too_big = {"success": False, "errorCode": 4000000,
+               "errorMsg": "单页数据量过大或非法"}
+    papers = [too_big, list_ok()]
+    api = FakeApi(papers)
+    api._ensure_anti_content = lambda force=False: None
+    try:
+        result = api.get_order_by_sn(ORDER_SN)
+        sizes = [c["payload"].get("pageSize") for c in api.calls
+                 if c["url"] == api.ORDER_LIST_URL]
+        check("Q9 首次 pageSize=50（不是 100）", sizes and sizes[0] == 50, sizes)
+        check("Q9 平台嫌大后降到 20 重试", 20 in sizes, sizes)
+        check("Q9 降级后命中订单并带出 spec",
+              (result.get("order") or {}).get("spec") == SPEC, result)
+    finally:
+        anti_content.invalidate(ACCOUNT)
+
+
+def scenario_pending_rule():
+    print("Q10 待发货判定：中文状态兜底（线上出现过原始 50 笔 / 待发货 0 笔）")
+    api = FakeApi([])
+    numeric = api._normalize_order({"order_sn": "S1", "shipping_status": 0, "pay_status": 2})
+    text_only = api._normalize_order({"order_sn": "S2", "shipping_status": 5,
+                                      "pay_status": 5, "order_status_str": "待发货"})
+    shipped = api._normalize_order({"order_sn": "S3", "shipping_status": 1, "pay_status": 2,
+                                    "order_status_str": "已发货"})
+    check("Q10 数字口径照旧识别待发货", numeric.get("pending_shipment") is True, numeric)
+    check("Q10 只有中文状态也能识别待发货",
+          text_only.get("pending_shipment") is True, text_only)
+    check("Q10 已发货不会被误判", shipped.get("pending_shipment") is False, shipped)
+
+
 def scenario_background():
     print("Q8 后台补签名：不阻塞调用方")
     orig = anti_content.capture
@@ -243,6 +278,8 @@ def main():
     scenario_headers()
     scenario_retry()
     scenario_merge_fallback()
+    scenario_page_size()
+    scenario_pending_rule()
     scenario_background()
     print("\n结果: %d 通过, %d 失败" % (_results["pass"], _results["fail"]))
     return 0 if _results["fail"] == 0 else 1

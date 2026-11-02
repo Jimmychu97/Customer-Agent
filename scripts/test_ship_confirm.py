@@ -61,6 +61,7 @@ ORDER_SN = "261028-423740065360537"
 GOODS_SHIP = 1002
 GOODS_MULTI = 1003   # 3 个规格：规格不明时绝不能发货（线上 1010294008341 就是这种）
 GOODS_SINGLE = 1004  # 只有 1 个规格：允许按「唯一规格」兜底
+GOODS_KB_ONLY = 1005  # 只在商品知识库里、SKU 没同步（线上 976314624020 就是这样）
 META = {"shop_id": SHOP_ID, "user_id": USER_ID, "from_uid": CUST_UID}
 
 EMPTY_CFG = {"server_id": None, "zhenxin_server_id": None, "device_type": None}
