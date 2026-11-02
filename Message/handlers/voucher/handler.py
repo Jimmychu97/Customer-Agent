@@ -1,6 +1,8 @@
 """
 核销/发货处理器：消息分派（can_handle / handle）+ 各职责 mixin 组合。
 """
+import asyncio
+
 from .state_mixin import StateMixin
 from .texts_mixin import TextsMixin
 from .notify_mixin import NotifyMixin
@@ -194,6 +196,26 @@ class VoucherDetectionHandler(StateMixin, TextsMixin, NotifyMixin, OrdersMixin, 
                 spec = spec or str(common.get("spec") or "")
                 goods_name = goods_name or str(common.get("goods_name") or "")
 
+        # 「按订单查询匹配商品管理」：客户给了订单号就用订单详情里的 goods_id/spec
+        # 去对商品配置（这条链不依赖买家UID，比待发货列表可靠）。查不到不影响后续判定。
+        order_detail_goods_id = None
+        order_detail_spec = ""
+        # 已有商品+规格（订单卡/商品卡带的）就不必再打一次平台接口
+        if order_sn and not (goods_id and spec):
+            try:
+                from core.order_lookup import get_order_detail
+
+                detail = await asyncio.to_thread(
+                    get_order_detail, shop_id, user_id, str(order_sn), retries=1)
+                if detail:
+                    order_detail_goods_id = detail.get("goods_id")
+                    order_detail_spec = str(detail.get("spec") or "")
+                    self.logger.info(
+                        f"[订单查询] 订单详情命中 order_sn={order_sn} "
+                        f"goods_id={order_detail_goods_id} spec={order_detail_spec!r}")
+            except Exception as e:
+                self.logger.debug(f"[订单查询] 订单详情查询失败 order_sn={order_sn}: {e}")
+
         # 服务模式一律按「客户这一单」判定：订单卡 > 已认领的本单 > 订单详情 >
         # 全店唯一待发货单 > 待发货商品一致 > 历史商品卡 > 本单落库模式。
         # 判定不出来就是 None（未确定），绝不再退化成默认的卡券核销——
@@ -204,6 +226,8 @@ class VoucherDetectionHandler(StateMixin, TextsMixin, NotifyMixin, OrdersMixin, 
             message_goods_id=goods_id,
             message_spec=spec,
             order_sn=order_sn,
+            order_detail_goods_id=order_detail_goods_id,
+            order_detail_spec=order_detail_spec,
             claimed_order=claimed_order or None,
             picked_order=picked_order,
             common_goods=common,

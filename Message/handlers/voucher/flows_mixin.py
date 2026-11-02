@@ -38,7 +38,7 @@ class FlowsMixin:
                 self._record_message(session_id, "assistant", guide)
                 return True
 
-        if found and found.get("status") == 1 and found.get("sn_imei"):
+        if found and found.get("status") in (1, 4) and found.get("sn_imei"):
             self.logger.info(f"[发货] 订单已发货，按该单核对服务并补报告 order_sn={order_sn}")
             if await self._resend_or_query_report(
                     found["sn_imei"], found, shop_id, user_id, from_uid, order_sn):
@@ -68,7 +68,7 @@ class FlowsMixin:
             return True
 
         if found:
-            state = "已发货" if found.get("status") == 1 else "待发货"
+            state = "已发货" if found.get("status") in (1, 4) else "待发货"
             guide = (
                 f"✅ 已核对到订单：{order_sn}\n本单状态：{state}\n"
                 f"请把手机序列号/IMEI 发我，我马上查询并出报告。"
@@ -113,7 +113,7 @@ class FlowsMixin:
             # 平台会重复推送同一张订单卡：已发货的单直接告知，
             # 不新建空单，也不再向客户索要已经发过的序列号
             shipped = self._order_by_sn(shop_id, order_sn)
-            if shipped and shipped.get("status") == 1:
+            if shipped and shipped.get("status") in (1, 4):
                 self.logger.info(f"[发货] 订单卡重复推送，订单已发货 order_sn={order_sn}")
                 # 已发货的历史单：不主动把报告刷一遍，只提示客户「要就开口」
                 reply = await self._reply_for_shipped_order(

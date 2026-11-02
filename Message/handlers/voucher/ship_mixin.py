@@ -5,6 +5,7 @@ from .intents import _is_confirm_text
 from .io_exec import _io
 from .state import _ship_inflight
 from .state import _ship_inflight_guard
+from .texts import _NO_REPORT_REORDER_TEXT
 from .texts import _REPORT_ALREADY_SENT_TEXT
 from .texts import _SHIP_ERROR
 from .texts import _SHIP_FAILED
@@ -399,6 +400,37 @@ class ShipMixin:
             "这单的验机服务口径没找到，麻烦把【订单卡片】或【订单号】发我，我按订单帮您查～")
         return True
 
+    def _can_query_report(self, goods_id=None, spec: str = "",
+                          found: Optional[Dict[str, Any]] = None) -> bool:
+        """这单还能不能补出报告：有历史报告、有 SKU 口径，或能按商品+规格解析到验机服务
+
+        用来决定对客话术：**查不了就绝不说「马上帮您查」**，否则客户会一直等。
+        """
+        found = found or {}
+        if found.get("gsx_result") or found.get("sku_id"):
+            return True
+        if goods_id in (None, "", 0, "0"):
+            return False
+
+        effective_spec = (spec or "").strip()
+        if not effective_spec:
+            # 商品只有一个规格时查询项目是确定的，可以直接补查；
+            # 多规格又不知道规格，才是真的查不了。
+            try:
+                from Message.core.conversation_product import _backfill_single_spec
+
+                effective_spec = _backfill_single_spec(str(goods_id)) or ""
+            except Exception:
+                effective_spec = ""
+        if not effective_spec:
+            return False
+
+        try:
+            cfg = self._resolve_query_config(goods_id, effective_spec)
+        except Exception:
+            return False
+        return bool(cfg.get("server_id") or cfg.get("zhenxin_server_id"))
+
     async def _reply_for_shipped_order(self, sn: str, found: Optional[Dict[str, Any]], shop_id: str,
                                        user_id: str, from_uid: str, order_sn: str = "",
                                        goods_id=None, spec: str = "") -> Optional[str]:
@@ -406,18 +438,27 @@ class ShipMixin:
 
         客户再发一次序列号时，先确认「有没有新单」；命中的是已发货的历史单，
         就只回一句提示，把「要不要报告」的选择留给客户，避免把旧报告刷屏。
+
+        三种口径（关键：查不了就明说，不许承诺马上补）：
+          - 有历史报告        → 回复「重发」
+          - 没报告但能查      → 回复「查报告」
+          - 没报告也查不了    → 说明这单没出报告，需重新下单或转人工
         """
         found = found or {}
         has_report = bool(found.get("gsx_result"))
+        can_query = self._can_query_report(goods_id, spec, found)
         self.logger.info(
             f"[发货] 命中已发货历史单，不主动发报告 sn={sn!r} order_sn={order_sn!r} "
-            f"has_report={has_report}")
+            f"has_report={has_report} can_query={can_query}")
         head = (f"✅ 订单 {order_sn} 之前已经发货完成啦\n" if order_sn
                 else "✅ 这单之前已经发货完成啦\n")
         line = f"序列号/IMEI：{sn}\n" if sn else ""
-        tail = ("需要这份验机报告的话回复「重发」，我马上发给您～"
-                if has_report else
-                "需要这份验机报告的话回复「查报告」，我马上帮您查～")
+        if has_report:
+            tail = "需要这份验机报告的话回复「重发」，我马上发给您～"
+        elif can_query:
+            tail = "需要这份验机报告的话回复「查报告」，我马上帮您查～"
+        else:
+            tail = _NO_REPORT_REORDER_TEXT
         return head + line + "\n" + tail + _UPSELL_HINT
 
     async def _resend_or_query_report(self, sn: str, found: Dict[str, Any], shop_id: str,
@@ -454,7 +495,10 @@ class ShipMixin:
             self.logger.info(
                 f"[发货] 历史单缺少验机服务口径，无法补发报告 order_sn={order_sn} "
                 f"goods_id={goods_id} spec={spec!r}")
-            return False
+            # 查不了就明说，并给出可执行的下一步（重新下单 / 转人工），
+            # 不再让客户等一句「马上整理报告」。
+            await self._send(shop_id, user_id, from_uid, _NO_REPORT_REORDER_TEXT)
+            return True
 
         # 序列号/IMEI 必须客户确认后才查验机
         if self._serial_needs_confirm(shop_id, from_uid, sn):

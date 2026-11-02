@@ -197,7 +197,16 @@ def resolve_service_mode_with_evidence(
     for evidence, goods_id, spec, sn in candidates:
         if goods_id in (None, "", 0, "0"):
             continue
-        mode = resolve_service_mode_optional(shop_platform_id, goods_id)
+        # 统一走 database.goods_config：SKU 级 service_mode > 免卡券开关 > 商品级配置。
+        # 只查商品级会漏掉「按 SKU 配的服务模式」，导致订单查到了商品却判不出模式。
+        mode = None
+        try:
+            from database.goods_config import resolve_service_mode as _resolve_by_goods
+
+            mode = _resolve_by_goods(goods_id, spec or None, shop_platform_id)
+        except Exception as e:
+            logger.debug(f"统一配置查询失败 goods_id={goods_id}: {e}")
+            mode = resolve_service_mode_optional(shop_platform_id, goods_id)
         if mode is None:
             # 商品查得到但没配服务模式：继续看下一个线索，别在这里塌成「卡券核销」
             logger.info(f"服务模式未配置，尝试下一个线索 goods_id={goods_id} 依据={evidence}")

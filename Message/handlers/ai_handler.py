@@ -265,7 +265,7 @@ class AIReplyHandler(BaseHandler):
                 order = session.query(Order).filter(
                     Order.shop_id == shop_id,
                     Order.session_id == from_uid,
-                    Order.status != 1,
+                    Order.status.notin_((1, 4)),
                     Order.created_at >= since,
                 ).order_by(Order.id.desc()).first()
                 if not order:

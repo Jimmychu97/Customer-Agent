@@ -51,6 +51,7 @@ from Message.handlers import voucher_handler as vh                              
 
 SHOP, ACC, CUST = "S1", "A1", "C1"
 GOODS_SHIP, GOODS_VOUCHER, GOODS_AUTO = 9200001, 9200002, 9200003
+GOODS_NOQUERY = 9200004     # 仅发货、且没有验机编码（补不出报告的场景）
 SPEC = "特惠激活锁"
 SERIAL, COUPON, ORDER_SN = "VQ627F3QQH", "123456789012", "261101-111111111111"
 
@@ -72,9 +73,13 @@ def seed(db):
         s.add(shop)
         s.flush()
         # 只在 SKU 层配置服务模式（product_knowledge 故意不建，证明不靠商品级兜底）
-        for goods_id, mode in ((GOODS_SHIP, 1), (GOODS_VOUCHER, 0), (GOODS_AUTO, 2)):
+        for goods_id, mode in ((GOODS_SHIP, 1), (GOODS_VOUCHER, 0), (GOODS_AUTO, 2),
+                               (GOODS_NOQUERY, 1)):
+            no_query = goods_id == GOODS_NOQUERY
             s.add(GoodsCommit(shop_id=SHOP, goods_id=str(goods_id), sku_id=f"k{goods_id}",
-                              spec_name=SPEC, zhenxin_server_id=1014, device_type="apple",
+                              spec_name=SPEC,
+                              zhenxin_server_id=None if no_query else 1014,
+                              server_id=None, device_type="apple",
                               service_mode=mode))
 
 
@@ -212,6 +217,58 @@ async def main():
         check("S6 不索要卡券", "查看卡券" not in text and "请提供卡券" not in text, text[:100])
         check("S6 引导发订单卡片/订单号", "订单卡片" in text or "订单号" in text, text[:100])
         check("S6 不擅自发货", h.ship_calls == [], h.ship_calls)
+
+        print("S7 只靠「订单查询 → 商品ID」判定：订单详情给『仅发货』商品")
+        reset(db)                       # 没有卡片绑定
+        h.sent.clear(); h.ship_calls.clear()
+        order_lookup.get_order_detail = lambda *a, **k: {
+            "pending_shipment": True, "goods_id": str(GOODS_SHIP),
+            "spec": SPEC, "goods_name": "gsx验机"}
+        await h.say(f"序列号 {SERIAL} 订单号 {ORDER_SN}")
+        text = h.text()
+        check("S7 按订单商品判为发货（请客户确认）", "请核对本次查询信息" in text, text[:90])
+        check("S7 不索要卡券", "查看卡券" not in text and "请提供卡券" not in text, text[:90])
+        await h.say("确认")
+        check("S7 确认后发货 1 次", h.ship_calls == [ORDER_SN], h.ship_calls)
+
+        print("S8 只靠「订单查询 → 商品ID」判定：订单详情给『卡券核销』商品")
+        reset(db)
+        h.sent.clear(); h.ship_calls.clear()
+        order_lookup.get_order_detail = lambda *a, **k: {
+            "pending_shipment": True, "goods_id": str(GOODS_VOUCHER),
+            "spec": SPEC, "goods_name": "gsx验机"}
+        await h.say(f"序列号 {SERIAL} 订单号 {ORDER_SN}")
+        text = h.text()
+        check("S8 按订单商品判为核销（索要卡券）",
+              "卡券" in text and "查看卡券" in text, text[:110])
+        check("S8 不发货", h.ship_calls == [], h.ship_calls)
+
+        print("S9 订单查询也查不到商品 → 未确定")
+        reset(db)
+        h.sent.clear(); h.ship_calls.clear()
+        order_lookup.get_order_detail = lambda *a, **k: None
+        await h.say(f"序列号 {SERIAL} 订单号 {ORDER_SN}")
+        text = h.text()
+        check("S9 不索要卡券", "查看卡券" not in text and "请提供卡券" not in text, text[:110])
+        check("S9 不擅自发货", h.ship_calls == [], h.ship_calls)
+
+        print("S10 已发货但没报告、且补不出来 → 明确说明，不许承诺马上查")
+        reset(db, GOODS_NOQUERY)
+        h.sent.clear(); h.ship_calls.clear()
+        order_lookup.get_order_detail = lambda *a, **k: {
+            "pending_shipment": True, "goods_id": str(GOODS_NOQUERY),
+            "spec": SPEC, "goods_name": "gsx验机"}
+        await h.say(f"序列号 {SERIAL}")
+        await h.say("确认")            # 发货成功（无验机配置 → 只发货不出报告）
+        check("S10 先正常发货", h.ship_calls == [ORDER_SN], h.ship_calls)
+        h.sent.clear()
+        await h.say(f"序列号 {SERIAL}")   # 客户再要报告
+        text = h.text()
+        check("S10 说明这单没出报告", "没出验机报告" in text or "没出报告" in text, text[:120])
+        check("S10 给出下一步（重新拍一单/人工）",
+              "重新拍一单" in text or "人工" in text, text[:120])
+        check("S10 不承诺马上查/马上整理",
+              "马上帮您查" not in text and "马上整理" not in text, text[:120])
     finally:
         try:
             db.engine.dispose()
