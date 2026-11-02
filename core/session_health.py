@@ -1,4 +1,4 @@
-﻿"""账号会话心跳：定时验活、失效自动重登、定期刷新 cookies 保活
+"""账号会话心跳：定时验活、失效自动重登、定期刷新 cookies 保活
 
 为什么需要：
 拼多多的登录态会在几天内悄悄过期（HTTP 接口报 `40002/会话已过期`，浏览器直接跳登录页），
@@ -24,6 +24,8 @@ _ENABLED = os.environ.get("ORDER_HEARTBEAT", "1") != "0"
 _INTERVAL = float(os.environ.get("ORDER_HEARTBEAT_INTERVAL", "180"))
 _REFRESH_INTERVAL = float(os.environ.get("ORDER_COOKIE_REFRESH_HOURS", "6")) * 3600.0
 _RELOGIN_COOLDOWN = float(os.environ.get("ORDER_RELOGIN_COOLDOWN", "1800"))
+# 刷新失败后的退避：登录态真失效时每 3 分钟硬刷一次只会把风控越打越死
+_REFRESH_FAIL_BACKOFF = float(os.environ.get("ORDER_REFRESH_FAIL_BACKOFF", "600"))
 
 _lock = threading.Lock()
 _thread: Optional[threading.Thread] = None
@@ -144,6 +146,31 @@ def check_once(now: Optional[float] = None) -> Dict[str, Any]:
                     _checks["refreshes"] += 1
                     entry["last_refresh"] = now
                 logger.info(f"[心跳] 账号 {account.get('username')} cookies 已刷新保活")
+            else:
+                # 浏览器 profile 被踢/过期时，光刷 cookies 是刷不活的：
+                # 直接升级成「密码重新登录」，否则订单查询三条通道会一直全废。
+                # 失败也要退避，别每 3 分钟硬刷一轮（线上 16:27~17:57 就是这么刷的）。
+                with _lock:
+                    entry["last_refresh"] = now - _REFRESH_INTERVAL + _REFRESH_FAIL_BACKOFF
+                    can_relogin = last_relogin <= 0 or now - last_relogin >= _RELOGIN_COOLDOWN
+                logger.warning(
+                    f"[心跳] 账号 {account.get('username')} cookies 刷新失败"
+                    f"（登录态大概率已失效），"
+                    f"{'改用密码重新登录…' if can_relogin else '重登冷却中，稍后再试'}")
+                if can_relogin:
+                    ok = _relogin(account)
+                    with _lock:
+                        if ok:
+                            _checks["relogins"] += 1
+                            entry["last_relogin"] = now
+                            entry["last_refresh"] = now
+                        else:
+                            _checks["failures"] += 1
+                    logger.info(
+                        f"[心跳] 账号 {account.get('username')} 密码重登"
+                        f"{'成功，cookies 已更新' if ok else '失败（需人工在界面重新登录）'}")
+                    if ok:
+                        valid = _check_valid(account)
 
         with _lock:
             entry["valid"] = bool(valid)
