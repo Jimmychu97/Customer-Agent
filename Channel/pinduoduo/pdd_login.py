@@ -98,6 +98,7 @@ from typing import Optional, Dict, Any, Tuple
 import sys
 from database import db_manager
 from playwright.async_api import async_playwright
+from Channel.pinduoduo import anti_content as _anti_content
 from Channel.pinduoduo.utils.API.get_shop_info import GetShopInfo
 from Channel.pinduoduo.utils.API.get_user_info import GetUserInfo
 
@@ -212,8 +213,12 @@ class PDDLogin():
                 timeout=30000
             )
 
+            await self._grab_anti_content(page)
             cookies_list = await context.cookies()
             cookies_dict = {cookie.get('name', ''): cookie.get('value', '') for cookie in cookies_list if cookie.get('name')}
+            anti_value = _anti_content.current(self.name)
+            if anti_value:
+                cookies_dict['anti_content'] = anti_value
             cookies_json = json.dumps(cookies_dict)
             self.logger.info(f"[登录] 登录成功 name={self.name}，已取得 {len(cookies_dict)} 个 cookie")
             return cookies_json
@@ -240,6 +245,46 @@ class PDDLogin():
                 except Exception as e:
                     self.logger.debug(f"停止Playwright失败: {e}")
         
+    async def _grab_anti_content(self, page, timeout_ms: int = 8000) -> str:
+        """顺手把订单页自己发出的 anti-content 抄下来
+
+        订单接口（recentOrderList）每次请求都要一个现算的签名，登录时 cookies 里那份
+        从来就没有过 —— 这就是订单查询永远 40002 的根因。登录/刷新时人已经在浏览器里，
+        打开订单页几乎零成本，抄到的签名直接让 HTTP 直连恢复可用。
+        """
+        box = {"value": ""}
+
+        def _on_request(request) -> None:
+            try:
+                if "pinduoduo.com" not in (request.url or ""):
+                    return
+                headers = request.headers or {}
+                value = headers.get("anti-content") or headers.get("anti_content") or ""
+                if value and not box["value"]:
+                    box["value"] = value
+            except Exception:
+                pass
+
+        try:
+            page.on("request", _on_request)
+            await page.goto("https://mms.pinduoduo.com/orders/list?tab=1",
+                            wait_until="domcontentloaded", timeout=timeout_ms)
+            for _ in range(max(1, int(timeout_ms / 200))):
+                if box["value"]:
+                    break
+                await asyncio.sleep(0.2)
+        except Exception as e:
+            self.logger.debug(f"[anti-content] 登录后抓签名失败 name={self.name}: {e}")
+        finally:
+            try:
+                page.remove_listener("request", _on_request)
+            except Exception:
+                pass
+        if box["value"]:
+            _anti_content.store(self.name, box["value"])
+            self.logger.info(f"[anti-content] 登录/刷新时已取到新签名 name={self.name}")
+        return box["value"]
+
     async def refresh_cookies(self, proxy: str = None):
         """重新获取cookies，使用已保存的用户数据，无需再次登录
 
@@ -301,9 +346,12 @@ class PDDLogin():
                 self.logger.warning("登录状态已失效，需要重新登录")
                 return False
 
-            # 获取最新的cookies
+            # 获取最新的cookies（顺手取一份新的 anti-content，订单接口靠它才不被风控）
+            anti_value = await self._grab_anti_content(page)
             cookies_list = await context.cookies()
             cookies_dict = {cookie.get('name', ''): cookie.get('value', '') for cookie in cookies_list if cookie.get('name')}
+            if anti_value:
+                cookies_dict['anti_content'] = anti_value
             cookies_json = json.dumps(cookies_dict)
 
             self.logger.info(f"成功刷新账号 '{self.name}' 的cookies")

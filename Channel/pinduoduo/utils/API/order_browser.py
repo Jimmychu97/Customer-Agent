@@ -1,4 +1,4 @@
-﻿"""用已登录的浏览器会话查商家后台待发货订单（HTTP 接口被风控时的兜底）
+"""用已登录的浏览器会话查商家后台待发货订单（HTTP 接口被风控时的兜底）
 
 为什么需要它：
 拼多多 `mms/recentOrderList` 必须带**每次请求现算的 anti-content 签名**，登录时存下来的
@@ -147,6 +147,23 @@ async def _fetch_async(account: str, timeout: float) -> List[Dict[str, Any]]:
                         done.set()
 
                 page.on("response", on_response)
+
+                # 顺手抄下页面现算的 anti-content：兜底成功一次，HTTP 直连就能恢复一阵
+                def on_request(request):
+                    try:
+                        if "pinduoduo.com" not in (request.url or ""):
+                            return
+                        headers = request.headers or {}
+                        value = headers.get("anti-content") or headers.get("anti_content") or ""
+                        if value:
+                            from Channel.pinduoduo import anti_content as _anti
+
+                            _anti.store(account, value)
+                    except Exception:
+                        pass
+
+                page.on("request", on_request)
+
                 await page.goto(ORDER_LIST_PAGE, wait_until="domcontentloaded",
                                 timeout=int(timeout * 1000))
                 current_url = getattr(page, "url", "") or ""

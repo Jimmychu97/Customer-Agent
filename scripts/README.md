@@ -12,6 +12,7 @@ scripts/
 ├── install_playwright.py  # Playwright 浏览器安装脚本
 ├── test_voucher_dedup.py  # 核销流程防重复建单/防空参核销自测脚本
 ├── test_ship_confirm.py   # 发货「客户确认 → 真发货 → 必反馈」自测脚本
+├── test_order_query.py    # 订单查询 anti-content 签名 / 40002 重试自测脚本
 ├── check_goods_config.py  # 商品验机配置缺口巡检（只读）
 ├── test_message_records.py# 消息记录（人工客服/AI）自测脚本
 ├── doctor.py              # 部署自检脚本（只读）

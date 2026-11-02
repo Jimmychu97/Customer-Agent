@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """规格 → 验机服务解析自测脚本（离线，不联网）
 
 覆盖 2026-10-29 15:32 那单的真实缺陷（客户买「特惠激活锁」，程序按「全面验机报告」查了）：
@@ -174,8 +174,9 @@ async def main() -> int:
 
     gsx_api.query_gsxunlocking = fake_gsx
     handler._query_gsxunlocking_and_send = fake_sender
-    handler._ship_via_platform = lambda order_sn, shop_id, user_id: {"success": True,
-                                                                    "result_code": 100}
+    shipped = []
+    handler._ship_via_platform = lambda order_sn, shop_id, user_id: (
+        shipped.append(order_sn) or {"success": True, "result_code": 100})
     handler._order_already_shipped = lambda *a, **k: False
     handler._already_shipped = lambda *a, **k: False
     handler._update_order_status = lambda *a, **k: None
@@ -186,9 +187,11 @@ async def main() -> int:
         SERIAL, ORDER_SN, SHOP_ID, USER_ID, CUST_UID, None,
         goods_id=GOODS_ID, spec="")
     check("S4 没换套餐去查（没有发生验机请求）", "srv" not in queried, queried)
-    check("S4 改要订单核对（不再说'确认后补发'）",
-          "订单" in (reply or "") and "确认后马上" not in (reply or ""), reply)
-    check("S4 状态仍是发货成功", status == vh._SHIP_SUCCESS, status)
+    check("S4 规格不明时绝不先发货", shipped == [], shipped)
+    check("S4 改要订单卡片/套餐名核对",
+          ("订单" in (reply or "") or "套餐" in (reply or "")) and "确认后马上" not in (reply or ""),
+          reply)
+    check("S4 状态是 error（未发货）", status == vh._SHIP_ERROR, status)
 
     print("S5 规格命中时用客户买的那个服务号")
     queried.clear()

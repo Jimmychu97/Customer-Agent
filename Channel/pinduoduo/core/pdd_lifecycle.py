@@ -24,6 +24,15 @@ class LifecycleMixin:
         username = account_info.get("username", user_id)
         connection_key = f"{shop_id}_{user_id}"
 
+        # 抢在第一条客户消息之前把订单接口的 anti-content 预热好（后台线程，不阻塞连接）。
+        # 订单列表/详情没有现算签名就固定 40002，而发货要靠它拿 spec。
+        try:
+            from Channel.pinduoduo import anti_content as _anti
+
+            _anti.ensure_background(username, account_info.get("proxy"))
+        except Exception as e:
+            self.logger.debug(f"[anti-content] 账号启动预热失败: {e}")
+
         self.status_manager.update_status(shop_id, user_id, username, ConnectionState.CONNECTING)
 
         if connection_key in self._reconnect_tasks:

@@ -28,6 +28,14 @@ SHIP_RESULT_CODE_SUCCESS = 100
 # 商家后台主机（仅用于 origin / referer 请求头；业务 URL 在类内按抓包原值完整声明）
 MMS_HOST = "https://mms.pinduoduo.com"
 
+# 平台把风控/限流伪装成「操作太过频繁」（error_code=40002）
+_RATE_LIMIT_HINTS = ("40002", "太过频繁")
+
+
+def _is_rate_limited(code=None, msg: str = "") -> bool:
+    text = f"{code or ''} {msg or ''}"
+    return any(hint in text for hint in _RATE_LIMIT_HINTS)
+
 
 class MmsOrderAPI(BaseRequest):
     """拼多多商家后台订单查询与无物流发货，使用商家后台 cookie 鉴权"""
@@ -41,17 +49,73 @@ class MmsOrderAPI(BaseRequest):
         super().__init__(shop_id=shop_id, user_id=user_id)
 
     def _build_headers(self) -> Dict[str, str]:
-        """构造商家后台接口请求头（anti-content 取自账号 cookies）"""
-        anti_content = self.cookies.get('anti_content') or self.cookies.get('anti-content', '')
+        """构造商家后台接口请求头
+
+        anti-content 必须是**现算的签名**（页面 JS 生成，几分钟就过期）。
+        旧实现取 cookies 里的 `anti_content`，但登录流程从没写过这个键，所以发出去的一直是
+        空签名 —— 平台固定回 40002，订单永远查不到。这里优先用 anti_content 模块里
+        刚抓到的签名，其次才是历史遗留的 cookies 值。
+        """
+        from Channel.pinduoduo import anti_content as _anti
+
+        anti_value = (_anti.current(self.account_name)
+                      or self.cookies.get('anti_content')
+                      or self.cookies.get('anti-content', ''))
         return {
             "accept": "*/*",
             "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "anti-content": anti_content,
+            "anti-content": anti_value,
             "content-type": "application/json",
             "origin": MMS_HOST,
             "referer": f"{MMS_HOST}/orders/list?tab=1",
             "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
         }
+
+    def _ensure_anti_content(self, force: bool = False) -> None:
+        """请求前确保签名新鲜（阻塞，可能开一次浏览器；只在 40002 重试时用）"""
+        try:
+            from Channel.pinduoduo import anti_content as _anti
+
+            _anti.ensure(self.account_name, self.proxy, force=force)
+        except Exception as e:
+            self.logger.debug(f"[anti-content] 确保签名失败（继续用旧值）: {e}")
+
+    def _warm_anti_content(self) -> None:
+        """请求前催一下签名（**不阻塞**）：缓存没有就让后台线程去抄，别卡住消息处理"""
+        try:
+            from Channel.pinduoduo import anti_content as _anti
+
+            _anti.ensure_background(self.account_name, self.proxy)
+        except Exception as e:
+            self.logger.debug(f"[anti-content] 后台取签名失败: {e}")
+
+    def _post_order_list(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """打一次 recentOrderList；40002 时换一份新签名再打一次"""
+        raw = self.post(self.ORDER_LIST_URL, json_data=payload, headers=self._build_headers())
+        if not raw or raw.get("success"):
+            return raw
+        code = raw.get("errorCode") or raw.get("error_code")
+        msg = raw.get("errorMsg") or raw.get("error_msg") or ""
+        if not _is_rate_limited(code, msg):
+            return raw
+        from Channel.pinduoduo import anti_content as _anti
+
+        self.logger.info(
+            f"[订单查询] 订单列表返回风控（{code}: {msg}），换新 anti-content 重试一次 "
+            f"账号={self.account_name}")
+        _anti.invalidate(self.account_name)
+        self._ensure_anti_content(force=True)
+        raw2 = self.post(self.ORDER_LIST_URL, json_data=payload,
+                         headers=self._build_headers())
+        if raw2 and not raw2.get("success"):
+            code2 = raw2.get("errorCode") or raw2.get("error_code")
+            msg2 = raw2.get("errorMsg") or raw2.get("error_msg") or ""
+            if _is_rate_limited(code2, msg2):
+                # 换了新签名还是被拒：把缓存作废，下次重新抓（别把坏签名留 20 分钟）
+                self.logger.warning(
+                    f"[订单查询] 换新签名后仍被风控（{code2}），作废缓存 账号={self.account_name}")
+                _anti.invalidate(self.account_name)
+        return raw2
 
     def _normalize_order(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """把响应 pageItems 中的原始订单裁剪为业务字典，pending_shipment 由判定规则算出"""
@@ -112,7 +176,8 @@ class MmsOrderAPI(BaseRequest):
             # sortType 在部分 tab 的抓包中出现、部分缺席，仅在有值时下发
             if sort_type is not None:
                 payload["sortType"] = sort_type
-            raw = self.post(self.ORDER_LIST_URL, json_data=payload, headers=self._build_headers())
+            self._warm_anti_content()
+            raw = self._post_order_list(payload)
 
             if not raw:
                 return {"success": False, "total": 0, "orders": [], "error_msg": "请求失败"}
@@ -239,6 +304,16 @@ class MmsOrderAPI(BaseRequest):
                     end_time=now,
                 )
                 if not result.get("success"):
+                    # recentOrderList 被风控时，用「合并发货页」接口兜底：
+                    # 该接口不受同一套 40002 限制，且返回里带 goods_id / spec，
+                    # 正好是发货要用的查询项目（线上就是这里拿不到 spec 才丢了报告）。
+                    merge = self.list_merge_shipping_orders(page_no=1)
+                    for order in (merge.get("orders") or []):
+                        if order.get("order_sn") == order_sn:
+                            self.logger.info(
+                                f"[订单查询] 订单列表被风控，改用合并发货页命中 order_sn={order_sn} "
+                                f"spec={order.get('spec')!r}")
+                            return {"success": True, "order": order, "error_msg": ""}
                     return {"success": False, "order": None,
                             "error_msg": result.get("error_msg") or "查询订单失败"}
 
