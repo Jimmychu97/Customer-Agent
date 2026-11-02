@@ -1,6 +1,7 @@
 """卡券核销：调验券接口并生成回复。"""
 from .texts import _VOUCHER_ERROR
 from .texts import _VOUCHER_FAILED
+from .texts import _REPORT_UNAVAILABLE_TEXT
 from .texts import _VOUCHER_SUCCESS
 from typing import Optional
 from typing import Tuple
@@ -56,6 +57,13 @@ class VerifyMixin:
         status = _VOUCHER_SUCCESS if result_text and "核销成功" in result_text else _VOUCHER_FAILED
         if status == _VOUCHER_SUCCESS and gsx_params:
             goods_id, spec, report_data, device_type = gsx_params
+            if not report_data:
+                # 核销成功但没拿到验机数据（商品/规格没对到验机编码）：
+                # 必须明确告诉客户报告还没出、下一步怎么做，不能只说「核销成功」。
+                self.logger.warning(
+                    f"[核销] 核销成功但没有验机数据 order_id={order_id} "
+                    f"goods_id={goods_id} spec={spec!r} device_type={device_type!r}")
+                return (result_text or "") + "\n\n" + _REPORT_UNAVAILABLE_TEXT, status
             if device_type == "apple":
                 await self._query_gsxunlocking_and_send(sn, goods_id, spec, report_data, order_id, shop_id, user_id, from_uid, result_text)
             else:
@@ -104,6 +112,25 @@ class VerifyMixin:
 
         # 验机查询：核销前先验证序列号，失败则清空 sn_imei 让用户重新提供
         query_cfg = self._get_query_config(goods_id, spec)
+        if not (query_cfg.get("server_id") or query_cfg.get("zhenxin_server_id")):
+            # 券详情里的规格写法常与商品同步的规格名不一致（例：券里是「全面验机 推荐」，
+            # 库里是「全面验机报告+人工解析」）。该商品只有一个规格时查询项目是唯一的，
+            # 直接用它的验机编码，不会查错套餐。
+            fallback_spec = None
+            try:
+                from Message.core.conversation_product import _backfill_single_spec
+
+                fallback_spec = _backfill_single_spec(str(goods_id))
+            except Exception:
+                fallback_spec = None
+            if fallback_spec and fallback_spec != spec:
+                cfg2 = self._get_query_config(goods_id, fallback_spec)
+                if cfg2.get("server_id") or cfg2.get("zhenxin_server_id"):
+                    self.logger.info(
+                        f"[核销] 规格名不一致，改用该商品唯一规格的验机编码 "
+                        f"goods_id={goods_id} 券规格={spec!r} 采用={fallback_spec!r}")
+                    query_cfg = cfg2
+                    spec = fallback_spec
         server_id   = query_cfg["server_id"]
         zhenxin_sid = query_cfg["zhenxin_server_id"]
         device_type = query_cfg["device_type"]
@@ -138,7 +165,22 @@ class VerifyMixin:
                 ), None
             report_data = gsx_result["data"]  # dict
         else:
-            self.logger.warning(f"[核销] 未找到查询配置，跳过验机验证 goods_id={goods_id} spec={spec!r}")
+            # 日志要能直接回答"为什么没报告"：商品在不在库、库里有哪些规格
+            known_specs = []
+            try:
+                from database import db_manager
+                from database.models import GoodsCommit
+
+                with db_manager.session_scope() as session:
+                    known_specs = [
+                        r[0] for r in session.query(GoodsCommit.spec_name)
+                        .filter(GoodsCommit.goods_id == str(goods_id)).all() if r[0]
+                    ]
+            except Exception:
+                known_specs = []
+            self.logger.warning(
+                f"[核销] 未找到查询配置，跳过验机验证 goods_id={goods_id} spec={spec!r} "
+                f"该商品在库规格={known_specs or '【商品未同步到商品管理】'}")
 
         result = api.verification(voucher_code, store_id=store_id or 0, order_sn=order_sn or "")
         if result["success"]:
