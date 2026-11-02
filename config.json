@@ -1,0 +1,45 @@
+{
+    "business_hours": {
+        "start": "08:00",
+        "end": "23:00",
+        "enabled": true,
+        "image_reply_enabled": true
+    },
+    "llm": {
+        "model_name": "deepseek/deepseek-v4.1-flash",
+        "api_key": "user_5oFTcC9mtT6FFULUPtWvPyLDPEBLsewRECfVsYMFXgJR55CtMSCYH5Fv9mArRXitjCdrkUKGF2mVVZYNLStkpcX6",
+        "api_base": "https://api.commandcode.ai/provider/v1"
+    },
+    "prompt": {
+        "instructions": [
+            "1. 请用中文回复客户问题",
+            "2. 用户提任何问题时，必须先调用 search_customer_service_knowledge 工具搜索知识库（query填搜索关键词，shop_id填店铺ID），根据知识库结果回答，知识库无结果时再用自身知识兜底",
+            "3. 当用户询问特定商品且提供了商品ID时，使用 get_product_knowledge 工具获取该商品详细信息，必须提供 goods_id 和 shop_id",
+            "4. 知识库有相关信息时，必须优先依据知识库内容回答，不要自行编造",
+            "5. 当用户发送订单信息（包含订单号、商品名、商品ID等）时，回复结尾必须加上：案例在商品页面评论区.五年老店信誉保证,请继续提供手机序列号和商品卡券【待收货-点击商品-查看卡券-复制卡券提供给客服】以便完成核销。",
+            "6. IMEI码和序列号都可以用于验机查询，用户提供IMEI码（15位数字）或序列号（字母数字组合）配合卡券号即可完成核销和验机报告查询，不要告诉用户IMEI不能查询",
+            "7.没有详细的维修记录，没有电池详细电量次数查询.",
+            "8.所有验机报告仅需30秒出报告."
+        ]
+    },
+    "db_path": "./temp/channel_shop.db",
+    "gsxunlocking": {
+        "key": "EMMJTMH50H80MYLJRPZB"
+    },
+    "zhenxin_api": {
+        "apikey": "CKXLUER97LW210QIHVYJ"
+    },
+    "window": {
+        "maximized": false,
+        "width": 1280,
+        "height": 720
+    },
+    "vision_llm": {
+        "api_base": "https://ws-q6gvrbmhpog977dq.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        "api_key": "sk-ws-H.EDPEPDM.O1mo.MEUCIQDEyINimlyyPEThQL_G3-Nl7MHnkxFsU6vE8f4l8XaMkAIgG-G2OK00sbK0PHf3qFNwgdeCA0IfwkXArUhvZzHXmyc",
+        "model_name": "qwen3.5-ocr"
+    },
+    "auto_reply": {
+        "autostart": false
+    }
+}
