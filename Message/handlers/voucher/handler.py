@@ -17,6 +17,7 @@ from ..base import BaseHandler
 from .intents import _is_confirm_text
 from .intents import _is_order_ask_text
 from .intents import _is_resend_text
+from .intents import _is_short_text
 from .modes import _SERVICE_MODE_AUTO
 from .modes import _SERVICE_MODE_SHIP
 from .modes import _SERVICE_MODE_VOUCHER
@@ -66,8 +67,13 @@ class VoucherDetectionHandler(StateMixin, TextsMixin, NotifyMixin, OrdersMixin, 
         shop_id = getattr(kwargs, "shop_id", None) if kwargs else None
         from_uid = getattr(kwargs, "from_uid", None) if kwargs else None
         if shop_id and from_uid:
+            pending_confirm = self._peek_confirm_pending(shop_id, from_uid)
             if _is_confirm_text(content):
-                return bool(self._peek_confirm_pending(shop_id, from_uid))
+                return bool(pending_confirm)
+            # 有「等确认」时，客户回的任何短句都归本处理器：否则「确认了」「对的」
+            # 会被 AI 接走，处理器既不会去查、也发不出提示，客户只能干等。
+            if pending_confirm and _is_short_text(content):
+                return True
             # 客户开口要报告（重发/查报告）：只有确实有历史已发货单时才接管
             if _is_resend_text(content):
                 shipped = self._latest_shipped_order(shop_id, from_uid)

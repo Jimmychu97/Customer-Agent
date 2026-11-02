@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """发货链路「防呆」自测脚本（离线，不联网）
 
 逐条验证客户消息重复推送、订单状态异常、参数缺失、接口限流时，
@@ -145,11 +145,15 @@ class Harness:
             return dict(self.ship_result)
 
         async def fake_sender(serial, goods_id, spec, report_data, order_id,
-                              shop_id, user_id, from_uid, voucher_success_text=""):
+                              shop_id, user_id, from_uid, voucher_success_text="",
+                              **kwargs):
             self.reports.append(report_data)
             if report_data:
                 # 与线上发送器一致：报告真正发出后打防重复标记
                 self.h._mark_report_sent(shop_id, from_uid, serial)
+            elif kwargs.get("on_empty_note"):
+                # 无数据时线上会发一条明确话术，这里同样记下来（客户必须得到结论）
+                self.sent.append(kwargs["on_empty_note"])
 
         async def fake_send(shop_id, user_id, from_uid, text):
             self.sent.append(text)
@@ -292,13 +296,14 @@ async def main():
     inflight = sum(1 for r, _ in results if r == vh._SHIP_IN_FLIGHT_TEXT)
     check("G6 其余请求被在途占位拦下", inflight == 2, (inflight, results))
 
-    print("G7 规格未知：不换套餐查（本次修复）")
+    print("G7 规格未知：单规格商品按唯一规格兜底，不换套餐查（本次修复）")
     h.reset()
     h.detail = None  # 平台限流，规格拿不到
     reply, status = await h.ship(spec="")
     check("G7 发货照常 1 次", h.ship_calls == [ORDER_SN], h.ship_calls)
-    check("G7 验机 0 次（不顶替全面验机）", h.gsx_calls == [], h.gsx_calls)
-    check("G7 改要订单卡片/订单号核对规格", "订单" in (reply or ""), reply)
+    check("G7 确认前 0 次验机（不顶替套餐）", h.gsx_calls == [], h.gsx_calls)
+    check("G7 请客户确认序列号后再查",
+          "确认" in (h.last() or "") and SERIAL in (h.last() or ""), h.last())
 
     print("G8 平台发货失败")
     h.reset()

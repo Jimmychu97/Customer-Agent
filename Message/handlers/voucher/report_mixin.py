@@ -2,6 +2,7 @@
 from .report import _format_gsx_result
 from .texts import _FIXED_REVIEW_TEXT
 from .texts import _REPORT_ALREADY_SENT_TEXT
+from .texts import _REPORT_EMPTY_TEXT
 from .texts import _SHIP_ERROR
 from .texts import _SHIP_FAILED
 from .texts import _SHIP_SUCCESS
@@ -74,7 +75,8 @@ class ReportMixin:
                     ), _SHIP_FAILED
                 await self._query_gsxunlocking_and_send(
                     sn, goods_text, spec_text, zx.get("result"), order_id,
-                    shop_id, user_id, from_uid, success_text)
+                    shop_id, user_id, from_uid, success_text,
+                    on_empty_note=_REPORT_EMPTY_TEXT)
             else:
                 from Channel.pinduoduo.utils.API.gsx_api import query_gsx
 
@@ -89,7 +91,8 @@ class ReportMixin:
                     ), _SHIP_FAILED
                 await self._query_gsx_and_send(
                     sn, goods_text, spec_text, gsx.get("data"), order_id,
-                    shop_id, user_id, from_uid, success_text)
+                    shop_id, user_id, from_uid, success_text,
+                    on_empty_note=_REPORT_EMPTY_TEXT)
             return None, _SHIP_SUCCESS
         except Exception as e:
             self.logger.opt(exception=True).error(f"[发货] 仅查询模式异常 sn={sn}: {e}")
@@ -98,19 +101,29 @@ class ReportMixin:
     async def _query_gsxunlocking_and_send(
         self, serial: str, goods_id: str, spec: str, report_data,
         order_id: int, shop_id: str, user_id: str, from_uid: str,
-        voucher_success_text: str = ""
+        voucher_success_text: str = "", on_empty_note: str = ""
     ) -> None:
         """发送 GsxUnlocking 报告（苹果设备）
         发送顺序：验机报告 → AI分析 → 核销成功 → 五星好评
+
+        on_empty_note 同 _query_gsx_and_send：只有发货/仅查询链路会传。
         """
         try:
             from database import db_manager
             from database.models import Order
 
             if not report_data:
-                self.logger.warning(f"[核销] 无 GsxUnlocking 数据，跳过报告发送 sn={serial}")
-                if voucher_success_text:
-                    await self._send(shop_id, user_id, from_uid, voucher_success_text)
+                if on_empty_note:
+                    self.logger.warning(
+                        f"[报告缺失] 无 GsxUnlocking 数据，改为明确告知客户 sn={serial} "
+                        f"goods_id={goods_id} spec={spec!r}")
+                    if voucher_success_text:
+                        await self._send(shop_id, user_id, from_uid, voucher_success_text)
+                    await self._send(shop_id, user_id, from_uid, on_empty_note)
+                else:
+                    self.logger.warning(f"[核销] 无 GsxUnlocking 数据，跳过报告发送 sn={serial}")
+                    if voucher_success_text:
+                        await self._send(shop_id, user_id, from_uid, voucher_success_text)
                 return
 
             query_cfg = self._get_query_config(goods_id, spec)
@@ -197,10 +210,13 @@ class ReportMixin:
     async def _query_gsx_and_send(
         self, serial: str, goods_id: str, spec: str, gsx_data: Optional[dict],
         order_id: int, shop_id: str, user_id: str, from_uid: str,
-        voucher_success_text: str = ""
+        voucher_success_text: str = "", on_empty_note: str = ""
     ) -> None:
         """发送 GSX 报告（数据已在 _query_and_verify 中获取）
         发送顺序：GSX报告 → AI分析 → 核销成功 → 五星好评
+
+        on_empty_note 只有「发货/仅查询」这类必须给客户一个结论的链路才传：
+        核销链路保持不变（核销成功即止），发货链路不允许静默吞掉报告。
         """
         try:
             from database import db_manager
@@ -209,9 +225,17 @@ class ReportMixin:
             self.logger.info(f"[核销] _query_gsx_and_send gsx_data={type(gsx_data).__name__} empty={not gsx_data}")
 
             if not gsx_data:
-                self.logger.warning(f"[核销] 无 GSX 数据，跳过报告发送 sn={serial}")
-                if voucher_success_text:
-                    await self._send(shop_id, user_id, from_uid, voucher_success_text)
+                if on_empty_note:
+                    self.logger.warning(
+                        f"[报告缺失] 无 GSX 数据，改为明确告知客户 sn={serial} "
+                        f"goods_id={goods_id} spec={spec!r}")
+                    if voucher_success_text:
+                        await self._send(shop_id, user_id, from_uid, voucher_success_text)
+                    await self._send(shop_id, user_id, from_uid, on_empty_note)
+                else:
+                    self.logger.warning(f"[核销] 无 GSX 数据，跳过报告发送 sn={serial}")
+                    if voucher_success_text:
+                        await self._send(shop_id, user_id, from_uid, voucher_success_text)
                 return
 
             query_cfg = self._get_query_config(goods_id, spec)

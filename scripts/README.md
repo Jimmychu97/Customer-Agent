@@ -11,6 +11,8 @@ scripts/
 ├── build_win_exe.py       # 简化打包脚本（快速构建）
 ├── install_playwright.py  # Playwright 浏览器安装脚本
 ├── test_voucher_dedup.py  # 核销流程防重复建单/防空参核销自测脚本
+├── test_ship_confirm.py   # 发货「客户确认 → 真发货 → 必反馈」自测脚本
+├── check_goods_config.py  # 商品验机配置缺口巡检（只读）
 ├── test_message_records.py# 消息记录（人工客服/AI）自测脚本
 ├── doctor.py              # 部署自检脚本（只读）
 ├── show_messages.py       # 聊天记录查看脚本（只读）

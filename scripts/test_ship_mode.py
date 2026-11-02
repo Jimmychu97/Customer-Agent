@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """无物流发货分支 / 三态服务模式 自测脚本（离线，不联网）
 
 覆盖场景：
@@ -351,7 +351,8 @@ async def scenario_9(h: Harness):
     orig_sender = h.handler._query_gsxunlocking_and_send
 
     async def capture_sender(serial, goods_id, spec, report_data, order_id,
-                             shop_id, user_id, from_uid, voucher_success_text=""):
+                             shop_id, user_id, from_uid, voucher_success_text="",
+                             **kwargs):
         captured["report_data"] = report_data
         captured["text"] = voucher_success_text
 
@@ -375,7 +376,8 @@ async def scenario_9(h: Harness):
     orig_sender2 = h.handler._query_gsx_and_send
 
     async def capture_sender2(serial, goods_id, spec, report_data, order_id,
-                              shop_id, user_id, from_uid, voucher_success_text=""):
+                              shop_id, user_id, from_uid, voucher_success_text="",
+                              **kwargs):
         captured["report_data"] = report_data
 
     h.handler._query_gsx_and_send = capture_sender2
@@ -446,7 +448,8 @@ async def scenario_10(h: Harness):
     gsxu.query_gsxunlocking = lambda imei, srv: {"success": True, "result": {"model": "iPhone15,2"}}
 
     async def noop_sender(serial, goods_id, spec, report_data, order_id,
-                          shop_id, user_id, from_uid, voucher_success_text=""):
+                          shop_id, user_id, from_uid, voucher_success_text="",
+                          **kwargs):
         return None
 
     orig_sender = h.handler._query_gsxunlocking_and_send

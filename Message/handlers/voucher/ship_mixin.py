@@ -3,10 +3,15 @@
 from .modes import _SERVICE_MODE_SHIP
 from .intents import _is_confirm_text
 from .io_exec import _io
+from .parsers import _extract_coupon
+from .parsers import _extract_imei
+from .parsers import _extract_order_sn
+from .parsers import _extract_serial
 from .state import _ship_inflight
 from .state import _ship_inflight_guard
 from .texts import _NO_REPORT_REORDER_TEXT
 from .texts import _REPORT_ALREADY_SENT_TEXT
+from .texts import _REPORT_EMPTY_TEXT
 from .texts import _SHIP_ERROR
 from .texts import _SHIP_FAILED
 from .texts import _SHIP_IN_FLIGHT_TEXT
@@ -137,15 +142,26 @@ class ShipMixin:
 
         # 验机前置：序列号在验机库查不到就绝不发货。
         # 发货不可回滚，而报告是发货后必须给的——查不到就没有补救余地，只能先拦住。
-        query_cfg = self._resolve_query_config(goods_id, spec or "")
+        query_cfg, spec, spec_count = self._ship_query_config(goods_id, spec or "")
         server_id = query_cfg["server_id"]
         zhenxin_sid = query_cfg["zhenxin_server_id"]
         device_type = query_cfg["device_type"]
         self.logger.info(
             f"[发货] 订单 {order_sn} 商品核对 goods_id={goods_id} spec={spec!r} "
-            f"-> device_type={device_type} server_id={server_id} zhenxin={zhenxin_sid}"
+            f"-> device_type={device_type} server_id={server_id} zhenxin={zhenxin_sid} "
+            f"specs={spec_count}"
         )
         report_query_enabled = bool(server_id or zhenxin_sid)
+
+        # 验机商品、但这次连规格都没拿到（客户只发了订单号/订单详情被风控）：发货前就拦住。
+        # 先发货再要规格的后果是报告永远出不来——线上 17:28 就是这么丢的报告。
+        # 注意：规格有值只是没配编码（商家漏配）不拦，照常发货并在报告链上明确告知。
+        if spec_count and not spec and not report_query_enabled:
+            self.logger.warning(
+                f"[发货] 验机商品缺少规格，发货前拦下 order_sn={order_sn} "
+                f"goods_id={goods_id} spec={spec!r} specs={spec_count} order_id={order_id}")
+            return self._ship_spec_needed_text(order_sn, spec_count), _SHIP_ERROR
+
         report_deduped = self._report_recently_sent(shop_id, from_uid, sn)
         serial_needs_confirm = self._serial_needs_confirm(shop_id, from_uid, sn)
 
@@ -247,8 +263,60 @@ class ShipMixin:
         # 苹果设备走 GsxUnlocking 报告链，其它走 GSX 报告链
         sender = self._query_gsxunlocking_and_send if device_type == "apple" else self._query_gsx_and_send
         await sender(sn, str(goods_id or ""), spec or "", report_data, order_id,
-                     shop_id, user_id, from_uid, success_text)
+                     shop_id, user_id, from_uid, success_text,
+                     on_empty_note=_REPORT_EMPTY_TEXT)
         return None, _SHIP_SUCCESS
+
+    def _product_spec_count(self, goods_id: str) -> int:
+        """该商品在 goods_commit 里配了几个规格（0 = 不是验机商品，纯发货）"""
+        if not goods_id:
+            return 0
+        try:
+            from database import db_manager
+            from database.models import GoodsCommit
+
+            with db_manager.session_scope() as session:
+                rows = session.query(GoodsCommit.spec_name).filter(
+                    GoodsCommit.goods_id == str(goods_id),
+                    GoodsCommit.spec_name.isnot(None),
+                ).all()
+            return len({s for (s,) in rows if s})
+        except Exception as e:
+            self.logger.debug(f"[发货] 读取商品规格失败 goods_id={goods_id}: {e}")
+            return 0
+
+    def _ship_query_config(self, goods_id, spec: str):
+        """解析发货要用的验机口径：返回 (cfg, spec, spec_count)
+
+        spec 缺失时**只**用「商品唯一规格」兜底，多规格绝不猜：客户买的是哪个套餐，
+        报告字段就得对得上。spec_count 用来区分两件事：
+          - spec_count > 0 且解析不到编码 → 客户还没说清买的是哪个套餐（先别发货）
+          - spec_count == 0             → 这个商品本来就不是验机商品（照常发货）
+
+        线上 17:28 那单就是前者：订单详情被风控拿不到、客户只发了订单号，spec 为空
+        却先把货发了，于是报告永远出不来（发货不可回滚，客户也不会再补一遍订单卡片）。
+        """
+        goods = str(goods_id or "")
+        empty = {"server_id": None, "zhenxin_server_id": None, "device_type": None}
+        resolved = spec or ""
+        cfg = self._resolve_query_config(goods, resolved) if goods else dict(empty)
+        spec_count = self._product_spec_count(goods)
+        has_code = bool(cfg.get("server_id") or cfg.get("zhenxin_server_id"))
+        if goods and not has_code and spec_count == 1:
+            try:
+                from Message.core.conversation_product import _backfill_single_spec
+
+                single = _backfill_single_spec(goods)
+            except Exception:
+                single = None
+            if single:
+                resolved = single
+                cfg = self._resolve_query_config(goods, resolved)
+                has_code = bool(cfg.get("server_id") or cfg.get("zhenxin_server_id"))
+                self.logger.info(
+                    f"[发货] 规格缺失，按商品唯一规格兜底 goods_id={goods} "
+                    f"spec={resolved!r} has_code={has_code}")
+        return cfg, resolved, spec_count
 
     async def _ship_with_confirm(self, sn: str, order_sn: str, order_id: Optional[int],
                                  shop_id: str, user_id: str, from_uid: str,
@@ -271,6 +339,19 @@ class ShipMixin:
                 goods_id = goods_id or detail.get("goods_id")
                 spec = spec or str(detail.get("spec") or "")
                 goods_name = goods_name or str(detail.get("goods_name") or "")
+
+        # 验机商品但没拿到规格：连"确认"都别发——客户确认了也发不了货（报告对不上），
+        # 先要订单卡片/套餐名，把查询项目核对清楚再走确认 → 发货 → 出报告。
+        cfg, resolved_spec, spec_count = self._ship_query_config(goods_id, spec or "")
+        missing_spec = not (spec or "").strip() and not resolved_spec
+        if spec_count and missing_spec and not (cfg.get("server_id") or cfg.get("zhenxin_server_id")):
+            self.logger.warning(
+                f"[发货] 验机商品没拿到规格，先不发货 order_sn={order_sn!r} "
+                f"goods_id={goods_id} spec={spec!r} specs={spec_count} from_uid={from_uid}")
+            return self._ship_spec_needed_text(order_sn, spec_count), _SHIP_ERROR
+        if resolved_spec and not spec:
+            spec = resolved_spec
+
         if self._ship_needs_confirm(shop_id, from_uid, sn, order_sn):
             await self._ask_ship_confirm(sn, order_sn, order_id, goods_id, spec, goods_name,
                                          shop_id, user_id, from_uid, newest=newest,
@@ -348,6 +429,13 @@ class ShipMixin:
         else:
             reply, _status = await self._query_report_only(
                 sn, goods_id, spec, shop_id, user_id, from_uid, order_id)
+            if reply is None and not self._report_recently_sent(shop_id, from_uid, sn):
+                # 「确认」之后的续接不允许一句话都没有：客户已经确认了，
+                # 这里静默就等于让他干等（线上 16:28 客户连问三次没人回）。
+                self.logger.error(
+                    f"[报告缺失] 客户确认后没有发出任何消息，补发兜底话术 "
+                    f"sn={sn} order_id={order_id} goods_id={goods_id} spec={spec!r}")
+                reply = _REPORT_EMPTY_TEXT
         if reply:
             await self._send(shop_id, user_id, from_uid, reply)
             self._record_message(session_id, "assistant", reply)
@@ -355,16 +443,36 @@ class ShipMixin:
 
     async def _handle_sn_confirm(self, content: str, shop_id: str, user_id: str,
                                  from_uid: str) -> Optional[bool]:
-        """客户回「确认」后，用记下的序列号/订单去发货或查验机；发别的内容就把这条作废"""
-        info = self._pop_confirm_pending(shop_id, from_uid)
+        """客户回「确认」后，用记下的序列号/订单去发货或查验机
+
+        以前是「先 pop 再判意图」：客户回一句「确认了」「好的稍等」都会把待确认
+        静默作废，之后再回「确认」就查无 pending —— 表现出来就是
+        「客户确认了却不查、也不回」。现在先判意图：
+          - 确认        → pop 并真正去查询/发货
+          - 换了新序列号/卡券/订单号 → pop（客户换单了），交给后续流程
+          - 其它短句    → 保留 pending，并回一句「我还在等您确认这一条」
+        """
+        info = self._peek_confirm_pending(shop_id, from_uid)
         if not info:
             return None
-        if not _is_confirm_text(content):
+        if _is_confirm_text(content):
+            self._pop_confirm_pending(shop_id, from_uid)
+            return await self._resume_confirmed_serial(info, shop_id, user_id, from_uid)
+        if (_extract_serial(content) or _extract_imei(content)
+                or _extract_coupon(content) or _extract_order_sn(content)):
+            self._pop_confirm_pending(shop_id, from_uid)
             self.logger.info(
-                f"[核销] 序列号确认被新消息打断，按新内容处理 from_uid={from_uid} "
+                f"[核销] 客户发了新的序列号/卡券/订单号，作废待确认 from_uid={from_uid} "
                 f"content={str(content or '')[:20]!r}")
             return None
-        return await self._resume_confirmed_serial(info, shop_id, user_id, from_uid)
+        self.logger.info(
+            f"[确认丢失] 没确认也没换单，保留待确认并提示 from_uid={from_uid} "
+            f"content={str(content or '')[:20]!r}")
+        note = self._serial_confirm_reminder_text(
+            str(info.get("sn") or ""), str(info.get("order_sn") or ""))
+        await self._send(shop_id, user_id, from_uid, note)
+        self._record_message(f"pinduoduo{from_uid}", "assistant", note)
+        return True
 
     async def _resend_last_report(self, shop_id: str, user_id: str, from_uid: str) -> bool:
         """客户开口要报告（重发/查报告）：按最近一张已发货单补发或补查"""
@@ -529,7 +637,8 @@ class ShipMixin:
                 f"❌ 验机查询失败：{result.get('error_msg', '未知错误')}\n请核对序列号后再发我。",
             )
             return True
-        await sender(sn, "", "", data, order_id, shop_id, user_id, from_uid, tail)
+        await sender(sn, "", "", data, order_id, shop_id, user_id, from_uid, tail,
+                     on_empty_note=_REPORT_EMPTY_TEXT)
         return True
 
     async def _handle_ship_branch(

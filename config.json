@@ -40,6 +40,6 @@
         "model_name": "qwen3.5-ocr"
     },
     "auto_reply": {
-        "autostart": false
+        "autostart": true
     }
 }

@@ -91,6 +91,41 @@ def _auto_start_all_accounts() -> None:
         logger.warning(f"启动自动回复失败: {e}")
 
 
+def _read_git_commit() -> str:
+    """读 .git 里的 commit（不依赖 git 命令，打包/受限环境也能用）"""
+    try:
+        from utils.path_utils import get_app_dir
+
+        git_dir = get_app_dir() / ".git"
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref:"):
+            ref = head.split(" ", 1)[1].strip()
+            return (git_dir / ref).read_text(encoding="utf-8").strip()[:12]
+        return head[:12]
+    except Exception:
+        return "unknown"
+
+
+def _log_runtime_identity(logger) -> None:
+    """启动第一行就打「跑的是哪份代码、哪个库」
+
+    改完没部署到实际运行目录时，日志里目录/commit 对不上，一眼就能看出来，
+    不用再靠猜「为什么修好的又坏了」。
+    """
+    import os
+    from pathlib import Path
+
+    from utils.path_utils import get_app_dir
+
+    app_dir = get_app_dir()
+    db_path = str(_app_config.get("db_path", "") or "./temp/channel_shop.db")
+    resolved_db = Path(db_path).resolve()
+    logger.info(
+        f"运行身份: 源码={app_dir} | CWD={Path.cwd()} | DB={resolved_db} | "
+        f"PID={os.getpid()} | commit={_read_git_commit()} | "
+        f"frozen={getattr(sys, 'frozen', False)}")
+
+
 def main():
     """应用程序主函数"""
     # 设置 Playwright 浏览器路径
@@ -103,6 +138,7 @@ def main():
     # 创建主窗口
     logger = _get_logger("App")
     logger.info("应用程序启动...")
+    _log_runtime_identity(logger)
 
     # Qt 槽函数里的异常只打到 stderr，GUI 没有控制台就等于「点了没反应」。
     # 统一兜底：写日志（带堆栈）+ 弹窗，避免任何一次点击静默失败。
