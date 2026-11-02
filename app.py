@@ -115,14 +115,15 @@ def _log_runtime_identity(logger) -> None:
     import os
     from pathlib import Path
 
+    from utils.build_tag import BUILD_TAG
     from utils.path_utils import get_app_dir
 
     app_dir = get_app_dir()
     db_path = str(_app_config.get("db_path", "") or "./temp/channel_shop.db")
     resolved_db = Path(db_path).resolve()
     logger.info(
-        f"运行身份: 源码={app_dir} | CWD={Path.cwd()} | DB={resolved_db} | "
-        f"PID={os.getpid()} | commit={_read_git_commit()} | "
+        f"运行身份: 标签={BUILD_TAG} | 源码={app_dir} | CWD={Path.cwd()} | "
+        f"DB={resolved_db} | PID={os.getpid()} | commit={_read_git_commit()} | "
         f"frozen={getattr(sys, 'frozen', False)}")
 
 

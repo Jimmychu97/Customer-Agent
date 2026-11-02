@@ -22,6 +22,8 @@ if not defined PY call :try "py -3"
 if not defined PY call :try "uv run python"
 if not defined PY goto :nopython
 echo  python  : %PY%
+for /f "usebackq tokens=*" %%L in (`findstr /r /c:"^BUILD_TAG" "utils\build_tag.py"`) do set "TAGLINE=%%L"
+if defined TAGLINE echo  code tag: %TAGLINE%
 
 rem ---- 2) stop old instance (same app.py) ----------------------------
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*app.py*' }; if ($p) { $p | ForEach-Object { Write-Host ('  stopping old pid ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } } else { Write-Host '  no running instance' }"
