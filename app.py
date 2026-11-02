@@ -107,6 +107,9 @@ def main():
     # Qt 槽函数里的异常只打到 stderr，GUI 没有控制台就等于「点了没反应」。
     # 统一兜底：写日志（带堆栈）+ 弹窗，避免任何一次点击静默失败。
     def _excepthook(exc_type, exc_value, exc_tb):
+        # Ctrl+C 停止程序不算异常，别在日志里刷一屏 Traceback
+        if issubclass(exc_type, KeyboardInterrupt):
+            return
         logger.opt(exception=(exc_type, exc_value, exc_tb)).error("未捕获异常（界面操作）")
         try:
             from PyQt6.QtWidgets import QMessageBox

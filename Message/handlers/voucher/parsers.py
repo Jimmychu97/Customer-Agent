@@ -116,7 +116,7 @@ def _extract_coupon(text: str, exclude_imei: str = None) -> Optional[str]:
     """
     text = _strip_order_sn(text)
     # 第一轮：必须含空格或连字符分隔的分组格式（高可信度），不跨行
-    for m in re.finditer(r'(?<!\d)(\d+(?:[ \t\-]+\d+)+)(?!\d)', text):
+    for m in re.finditer(r'(?<![0-9A-Za-z])(\d+(?:[ \t\-]+\d+)+)(?![0-9A-Za-z])', text):
         candidate = _normalize_number(m.group(1))
         if (candidate.isdigit() and not _is_phone(candidate)
                 and _COUPON_MIN_DIGITS <= len(candidate) <= _COUPON_MAX_DIGITS):
@@ -126,7 +126,7 @@ def _extract_coupon(text: str, exclude_imei: str = None) -> Optional[str]:
 
     # 第二轮：纯连续数字，精确匹配 10-14 位
     for m in re.finditer(
-        rf'(?<!\d)(\d{{{_COUPON_MIN_DIGITS},{_COUPON_MAX_DIGITS}}})(?!\d)', text
+        rf'(?<![0-9A-Za-z])(\d{{{_COUPON_MIN_DIGITS},{_COUPON_MAX_DIGITS}}})(?![0-9A-Za-z])', text
     ):
         candidate = m.group(1)
         if not _is_phone(candidate):
@@ -139,7 +139,7 @@ def _extract_coupon(text: str, exclude_imei: str = None) -> Optional[str]:
     # 注意：15 位数字串一律按 IMEI/订单号处理，不再截尾当卡券号——
     # 服务器日志 2026-09-23 08:25 就出现过把第二个 IMEI 的尾部
     # （355549350251721 -> 549350251721）误当卡券号，验券失败还多建了一张单。
-    for m in re.finditer(r'(?<!\d)(\d{16,18})(?!\d)', text):
+    for m in re.finditer(r'(?<![0-9A-Za-z])(\d{16,18})(?![0-9A-Za-z])', text):
         raw = m.group(1)
         if exclude_imei and (raw == exclude_imei or exclude_imei in raw):
             continue
@@ -162,9 +162,9 @@ def _extract_coupon_strict(text: str, exclude_imei: Optional[str] = None) -> Opt
     避免把序列号或订单号误判成卡券号。
     """
     text = _strip_order_sn(text)
-    long_numbers = re.findall(rf'(?<!\d)(\d{{{_COUPON_STRICT_MAX_DIGITS + 1},}})(?!\d)', text)
+    long_numbers = re.findall(rf'(?<![0-9A-Za-z])(\d{{{_COUPON_STRICT_MAX_DIGITS + 1},}})(?![0-9A-Za-z])', text)
     for m in re.finditer(
-        rf'(?<!\d)(\d+(?:[ \t\-]+\d+)+|\d{{{_COUPON_MIN_DIGITS},{_COUPON_STRICT_MAX_DIGITS}}})(?!\d)',
+        rf'(?<![0-9A-Za-z])(\d+(?:[ \t\-]+\d+)+|\d{{{_COUPON_MIN_DIGITS},{_COUPON_STRICT_MAX_DIGITS}}})(?![0-9A-Za-z])',
         text,
     ):
         raw = m.group(1)
