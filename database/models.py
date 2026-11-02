@@ -210,6 +210,11 @@ class GoodsCommit(Base):
     server_id = Column('SeverId', Integer, nullable=True, comment='GSX ServerId（安卓验机接口编码）')
     zhenxin_server_id = Column(Integer, nullable=True, comment='真心验机 ServerId（苹果验机接口编码）')
     device_type = Column(String(20), nullable=True, comment='设备类型：apple=苹果，android=安卓')
+    # 该 SKU 走哪种服务：0 卡券核销 / 1 仅发货 / 2 二选一兼容；为空则回退商品级配置
+    service_mode = Column(Integer, nullable=True,
+                          comment='SKU 级服务模式：0-卡券核销，1-仅发货，2-二选一兼容，空=跟随商品级')
+    # 旧版字段：仅发货（免卡券）。service_mode 为空时用它兼容历史配置
+    no_coupon_needed = Column(Boolean, default=False, nullable=True, comment='是否免卡券（旧版开关）')
     synced_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, comment='同步时间')
 
     __table_args__ = (
@@ -232,10 +237,12 @@ class Order(Base):
     sku_id = Column(String(100), nullable=True, comment='SKU ID（通过goods_id+spec匹配）')
     gsx_result = Column(Text, nullable=True, comment='GSX查询结果（JSON）')
     status = Column(Integer, default=0, nullable=False,
-                    comment='状态：0-待核销，1-核销成功，2-核销失败，3-已过期')
+                    comment='状态：0-待核销，1-核销成功，2-核销失败，3-已过期，4-免卡券(发货)完成')
     created_at = Column(DateTime, default=datetime.now, nullable=False, comment='创建时间')
     order_sn = Column(String(100), nullable=True, index=True, comment='拼多多订单号（发货流程使用）')
     service_mode = Column(Integer, nullable=True, comment='本单实际执行的服务模式：1-发货，2-卡券核销')
+    # 发货成功时间：与"核销成功(status=1)"分开记，避免两种服务互相误判
+    shipped_at = Column(DateTime, nullable=True, comment='发货成功时间；为空表示未发货')
 
     def __repr__(self):
         return f"<Order(id={self.id}, shop_id='{self.shop_id}', session_id='{self.session_id}', sn_imei='{self.sn_imei}', status={self.status})>"
@@ -264,3 +271,34 @@ class MessageRecord(Base):
 
     def __repr__(self):
         return f"<MessageRecord(id={self.id}, direction='{self.direction}', from_uid='{self.from_uid}', msg_type='{self.msg_type}')>"
+
+
+class ConversationProduct(Base):
+    """会话当前商品绑定表
+
+    客户在聊天里发出的订单卡片(ORDER_INFO)/商品卡片(GOODS_CARD)/规格卡片(GOODS_SPEC)
+    本身就带 goodsID 与 spec，无需调用平台订单接口（订单列表没有买家UID，还会被风控）。
+    这里按 (shop_id, from_uid) 记录「这个客户当前在办哪个商品」，供：
+      - 处理器判定走「卡券核销」还是「发货」
+      - AI 提示词判断是否还该索要卡券
+    每个会话只保留一行（后到覆盖）。
+    """
+    __tablename__ = 'conversation_product'
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment='主键ID')
+    shop_id = Column(String(100), nullable=False, index=True, comment='店铺ID')
+    from_uid = Column(String(100), nullable=False, index=True, comment='客户UID')
+    goods_id = Column(String(100), nullable=False, comment='商品ID')
+    spec_name = Column(String(255), nullable=True, comment='规格名称（与 goods_commit.spec_name 对应）')
+    order_sn = Column(String(100), nullable=True, comment='平台订单号（订单卡片才有）')
+    created_at = Column(DateTime, default=datetime.now, nullable=False, comment='创建时间')
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False,
+                        comment='更新时间（超过窗口即视为过期，不参与判定）')
+
+    __table_args__ = (
+        UniqueConstraint('shop_id', 'from_uid', name='uix_conversation_product_shop_uid'),
+    )
+
+    def __repr__(self):
+        return (f"<ConversationProduct(shop_id='{self.shop_id}', from_uid='{self.from_uid}', "
+                f"goods_id='{self.goods_id}', spec='{self.spec_name}')>")

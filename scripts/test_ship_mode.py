@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """无物流发货分支 / 三态服务模式 自测脚本（离线，不联网）
 
 覆盖场景：
@@ -7,7 +7,7 @@
 3. mode=1：只给卡券 -> 不核销、不发请求，回「无需卡券」提示
 4. mode=2（二选一兼容）：给卡券 -> 核销；只给订单号 -> 发货
 5. 订单号不会被误识别为卡券号（_extract_coupon / _extract_order_sn 互斥）
-6. 重复触发：同一订单已 status=1 且 order_sn 一致时，发货接缝最多调用 1 次
+6. 重复触发：同一订单已发货(status=4) 且 order_sn 一致时，发货接缝最多调用 1 次
 7. 接缝默认实现：不替换 _ship_via_platform 时回「尚未配置」且不抛未捕获异常
 8. 订单卡先到、序列号后到：复用同一单，发货带的是订单卡里的订单号
 
@@ -32,6 +32,11 @@ except Exception:
     pass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 自测的临时数据库统一放到 temp/ 下，免得在项目根堆一堆 ship_guard_xxx 目录
+tempfile.tempdir = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "temp")
+os.makedirs(tempfile.tempdir, exist_ok=True)
 
 # 沙箱里 loguru 的 enqueue 需要命名管道，离线自测关掉异步写日志
 import loguru
@@ -238,8 +243,8 @@ async def scenario_2(h: Harness):
     check("S2: 核销 0 次调用", len(h.verify_calls) == 0, h.verify_calls)
     check("S2: 发货接缝 1 次调用", h.ship_calls == [ORDER_SN], h.ship_calls)
     rows = h.orders()
-    check("S2: 1 条单、已发货、订单号落库",
-          len(rows) == 1 and rows[0][3] == 1 and rows[0][4] == ORDER_SN, rows,
+    check("S2: 1 条单、已发货(status=4)、订单号落库",
+          len(rows) == 1 and rows[0][3] == 4 and rows[0][4] == ORDER_SN, rows,
           skip=not HAS_ORDER_SN_COL)
     check("S2: 回复含「发货成功」", "发货成功" in h.last(), h.last())
 

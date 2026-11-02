@@ -90,6 +90,28 @@ class ServiceModeMixin:
             )
 
         local_mode = self._local_order_mode(shop_id, from_uid, order_sn=order_sn)
+
+        # 卡片优先：本条消息自带的商品 > 会话里绑定的商品（都不查平台订单）
+        try:
+            from core.service_mode import EVIDENCE_CONVERSATION, ServiceModeResolution
+            from database.goods_config import resolve_service_mode_for_session
+
+            bound = resolve_service_mode_for_session(
+                shop_id, from_uid,
+                fallback_goods_id=message_goods_id, fallback_spec=message_spec)
+            if bound.get("mode") is not None:
+                evidence = (EVIDENCE_CONVERSATION if bound.get("evidence") == "conversation_card"
+                            else "message_goods")
+                self.logger.info(
+                    f"[核销] 服务模式判定 mode={bound['mode']} 依据={evidence} "
+                    f"goods_id={bound.get('goods_id')} spec={bound.get('spec')!r}")
+                return ServiceModeResolution(
+                    mode=bound["mode"], evidence=evidence,
+                    goods_id=bound.get("goods_id"), spec=bound.get("spec") or "",
+                    order_sn=order_sn or bound.get("order_sn"))
+        except Exception as e:
+            self.logger.debug(f"[核销] 卡片商品判定失败: {e}")
+
         resolution = resolve_service_mode_with_evidence(
             shop_id, local_order_mode=local_mode, **clues)
         self.logger.info(
@@ -113,21 +135,17 @@ class ServiceModeMixin:
         return cfg
 
     def _get_query_config(self, goods_id: str, spec: str) -> dict:
-        """从 GoodsCommit 查询验机配置"""
+        """验机配置统一走 database.goods_config（与 AI 提示词共用同一份配置来源）"""
+        empty = {"server_id": None, "zhenxin_server_id": None, "device_type": None}
         try:
-            from database import db_manager
-            from database.models import GoodsCommit
-            with db_manager.session_scope() as session:
-                gc = session.query(GoodsCommit).filter_by(
-                    goods_id=goods_id, spec_name=spec
-                ).first()
-                if not gc:
-                    return {"server_id": None, "zhenxin_server_id": None, "device_type": None}
-                return {
-                    "server_id":         str(gc.server_id) if gc.server_id else None,
-                    "zhenxin_server_id": str(gc.zhenxin_server_id) if gc.zhenxin_server_id else None,
-                    "device_type":       gc.device_type,
-                }
+            from database.goods_config import get_verify_config
+
+            cfg = get_verify_config(goods_id, spec or None)
+            return {
+                "server_id": cfg.get("server_id"),
+                "zhenxin_server_id": cfg.get("zhenxin_server_id"),
+                "device_type": cfg.get("device_type"),
+            }
         except Exception as e:
             self.logger.error(f"[核销] 查询验机配置失败: {e}")
-            return {"server_id": None, "zhenxin_server_id": None, "device_type": None}
+            return empty

@@ -214,6 +214,11 @@ class VoucherDetectionHandler(StateMixin, TextsMixin, NotifyMixin, OrdersMixin, 
             goods_id = resolution.goods_id
             goods_from_history = resolution.is_weak
         spec = spec or resolution.spec
+        # 卡片里带的订单号直接用上：客户发过订单卡片，就不用再找他要一次订单号
+        if not order_sn and getattr(resolution, "order_sn", None):
+            order_sn = str(resolution.order_sn) or None
+            if order_sn:
+                self.logger.info(f"[发货] 用会话卡片里的订单号 order_sn={order_sn}")
 
         # 弱依据（只在历史消息里见过商品卡）不足以断定「这单一定要卡券」：
         # 客户这单可能是发货商品，按未确定处理。

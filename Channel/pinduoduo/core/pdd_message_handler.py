@@ -140,13 +140,63 @@ class MessageHandlerMixin:
         }
         return context.type in queue_types
 
+    # 会自带商品信息的消息类型：从这里绑定「客户当前在办哪个商品」
+    _PRODUCT_CONTEXT_TYPES = {
+        ContextType.ORDER_INFO,
+        ContextType.GOODS_CARD,
+        ContextType.GOODS_SPEC,
+        ContextType.GOODS_INQUIRY,
+    }
+
     def _record_incoming_message(self, context: Context):
         """将客户发送的消息内容落库（只记录进入队列处理的消息）"""
+        self._bind_conversation_product(context)
         try:
             from Message.core.persistence import record_incoming_message
             record_incoming_message(context)
         except Exception as e:
             self.logger.debug(f"记录客户消息失败: {e}")
+
+    def _bind_conversation_product(self, context: Context):
+        """把订单卡/商品卡/规格卡里的 goodsID + spec 绑定到会话
+
+        这单该走「卡券核销」还是「发货」，取决于客户买的是哪个商品；
+        平台订单列表接口没有买家UID、还经常被风控，所以以卡片自带的信息为准，
+        不依赖平台查询（旧版就是这么做的）。
+        """
+        try:
+            if context.type not in self._PRODUCT_CONTEXT_TYPES:
+                return
+            data = context.content
+            if isinstance(data, str):
+                text = data.strip()
+                if not text.startswith("{"):
+                    return
+                import json
+                data = json.loads(text)
+            if not isinstance(data, dict):
+                return
+
+            goods_id = data.get("goods_id")
+            if not goods_id:
+                return
+
+            kwargs = context.kwargs
+            shop_id = getattr(kwargs, "shop_id", None)
+            from_uid = getattr(kwargs, "from_uid", None)
+            if not shop_id or not from_uid:
+                return
+
+            from Message.core.conversation_product import bind_product
+            bind_product(
+                shop_id=str(shop_id),
+                from_uid=str(from_uid),
+                goods_id=goods_id,
+                spec_name=data.get("spec") or data.get("goods_spec"),
+                order_sn=data.get("order_id"),
+            )
+        except Exception as e:
+            self.logger.debug(f"[会话商品] 绑定失败: {e}")
 
     def _record_mall_cs_message(self, context: Context):
         """记录本店客服（mall_cs）发出的消息

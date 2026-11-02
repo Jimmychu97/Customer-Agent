@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """完整跑线：卡券商品走卡券，发货商品走发货（离线，不联网）
 
 用和线上同构的数据（同一店铺：一个「仅发货」商品 + 一个「卡券核销」商品），
@@ -27,6 +27,11 @@ except Exception:
     pass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 自测的临时数据库统一放到 temp/ 下，免得在项目根堆一堆 ship_guard_xxx 目录
+tempfile.tempdir = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "temp")
+os.makedirs(tempfile.tempdir, exist_ok=True)
 
 import loguru
 
@@ -663,8 +668,12 @@ async def main():
     old_order = "261030-067612208771626"
     new_order = "261031-629040760451626"
     with db.session_scope() as s:
+        from datetime import datetime as _now
+
+        # 已发货完成 = status 4 + shipped_at（status 1 只代表核销成功）
         s.add(Order(shop_id=SHOP_ID, session_id=CUST_UID, sn_imei=SERIAL, coupons="",
-                    order_sn=old_order, status=1, service_mode=1,
+                    order_sn=old_order, status=4, service_mode=1,
+                    shipped_at=_now.now(),
                     sku_id="1014", gsx_result="旧报告内容"))
     h.pending_summary = {"status": "unique", "orders": [{
         "order_sn": new_order, "goods_id": SHIP_GOODS, "spec": SPEC,
@@ -682,8 +691,12 @@ async def main():
     h.reset()
     clear_orders(db)
     with db.session_scope() as s:
+        from datetime import datetime as _now
+
+        # 已发货完成 = status 4 + shipped_at（status 1 只代表核销成功）
         s.add(Order(shop_id=SHOP_ID, session_id=CUST_UID, sn_imei=SERIAL, coupons="",
-                    order_sn=old_order, status=1, service_mode=1,
+                    order_sn=old_order, status=4, service_mode=1,
+                    shipped_at=_now.now(),
                     sku_id="1014", gsx_result="旧报告内容"))
     h.pending_summary = {"status": "empty", "orders": []}
     await h.send("序列号 %s" % SERIAL, goods_id=SHIP_GOODS)

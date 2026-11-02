@@ -115,6 +115,7 @@ def resolve_service_mode(shop_platform_id: str, goods_id) -> int:
 # ==============================================================================
 
 EVIDENCE_MESSAGE_ORDER = "message_order"    # 本条消息自带商品（订单卡/商品卡）
+EVIDENCE_CONVERSATION = "conversation_card"  # 会话绑定的商品（卡片推送直带，不查平台）
 EVIDENCE_CLAIMED_ORDER = "claimed_order"    # 已认领到本客户的这一笔待发货单
 EVIDENCE_ORDER_DETAIL = "order_detail"      # 按订单号查到的订单详情
 EVIDENCE_PENDING_UNIQUE = "pending_unique"  # 全店唯一待发货单

@@ -209,8 +209,11 @@ class CustomerAgent(Bot):
                 session_id = f"fallback_{abs(hash(query)) % 100000}"
                 dependencies = {}
 
-            # 服务模式：先读「客户这一单」的落库结论（与消息分派同一个来源），
-            # 读不到再退回历史消息里的商品卡；都没有则为 None（未确定，不索要卡券）
+            # 服务模式：与处理器分派共用同一入口——
+            # 1) 会话绑定的商品（订单卡/商品卡直带 goodsID，不查平台）
+            # 2) 该客户未完成订单的落库结论
+            # 3) 历史消息里的商品卡
+            # 都没有则为 None（未确定，绝不索要卡券）
             if dependencies:
                 try:
                     from core.service_mode import (
@@ -218,19 +221,26 @@ class CustomerAgent(Bot):
                         resolve_service_mode_for_customer_optional,
                         resolve_service_mode_from_orders_db,
                     )
+                    from database.goods_config import resolve_service_mode_for_session
 
                     shop_id = getattr(context.kwargs, "shop_id", None)
-                    order_resolution = await asyncio.to_thread(
-                        resolve_service_mode_from_orders_db, shop_id, from_uid)
-                    if order_resolution.is_known:
-                        dependencies["service_mode"] = order_resolution.mode
-                        dependencies["service_mode_evidence"] = order_resolution.evidence
+                    session_res = await asyncio.to_thread(
+                        resolve_service_mode_for_session, shop_id, from_uid)
+                    if session_res.get("mode") is not None:
+                        dependencies["service_mode"] = session_res["mode"]
+                        dependencies["service_mode_evidence"] = session_res["evidence"]
                     else:
-                        history_mode = resolve_service_mode_for_customer_optional(
-                            shop_id, from_uid)
-                        dependencies["service_mode"] = history_mode
-                        dependencies["service_mode_evidence"] = (
-                            EVIDENCE_HISTORY if history_mode is not None else "none")
+                        order_resolution = await asyncio.to_thread(
+                            resolve_service_mode_from_orders_db, shop_id, from_uid)
+                        if order_resolution.is_known:
+                            dependencies["service_mode"] = order_resolution.mode
+                            dependencies["service_mode_evidence"] = order_resolution.evidence
+                        else:
+                            history_mode = resolve_service_mode_for_customer_optional(
+                                shop_id, from_uid)
+                            dependencies["service_mode"] = history_mode
+                            dependencies["service_mode_evidence"] = (
+                                EVIDENCE_HISTORY if history_mode is not None else "none")
                 except Exception as e:
                     logger.debug(f"[对话] 解析服务模式失败: {e}")
 

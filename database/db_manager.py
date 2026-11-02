@@ -66,9 +66,8 @@ class DatabaseManager:
     def _migrate_add_service_mode_columns(self):
         """为旧数据库补充服务模式相关列（幂等）
 
-        分别检查 product_knowledge.service_mode、orders.order_sn、
-        orders.service_mode 是否存在，缺失才执行 ALTER TABLE ADD COLUMN。
-        SQLite 对新增可空列是安全的，不会重写既有数据。
+        分别检查 product_knowledge / orders / goods_commit 上的服务模式相关列，
+        缺失才执行 ALTER TABLE ADD COLUMN。SQLite 对新增可空列是安全的，不会重写既有数据。
         """
         try:
             from sqlalchemy import text
@@ -77,6 +76,12 @@ class DatabaseManager:
                 ('product_knowledge', 'service_mode', 'INTEGER NOT NULL DEFAULT 0'),
                 ('orders', 'order_sn', 'VARCHAR(100)'),
                 ('orders', 'service_mode', 'INTEGER'),
+                # 发货完成与核销成功必须分开记：旧版用 status=4 表示「免卡券（发货）完成」
+                ('orders', 'shipped_at', 'DATETIME'),
+                # SKU 级服务模式 + 旧版免卡券开关：验机编码本身在 SKU 上，同一商品不同规格
+                # 可能一个走发货、一个走卡券，所以配置要能落到 SKU 这一层
+                ('goods_commit', 'service_mode', 'INTEGER'),
+                ('goods_commit', 'no_coupon_needed', 'BOOLEAN DEFAULT 0'),
             ]
             with self.engine.connect() as conn:
                 for table, column, ddl in targets:
@@ -89,6 +94,20 @@ class DatabaseManager:
                         ))
                         conn.commit()
                         self.logger.info(f"迁移：{table} 表已添加列 {column}")
+
+                # 历史数据回填：旧版把「发货成功」也写成 status=1 并置 service_mode=1，
+                # 新语义下这些行是「免卡券完成」，补上 shipped_at，避免被当成核销成功。
+                order_cols = [row[1] for row in conn.execute(text("PRAGMA table_info(orders)"))]
+                if "shipped_at" in order_cols:
+                    result = conn.execute(text(
+                        "UPDATE orders SET shipped_at = created_at "
+                        "WHERE shipped_at IS NULL AND order_sn IS NOT NULL "
+                        "AND order_sn <> '' AND status = 1 AND service_mode = 1"
+                    ))
+                    conn.commit()
+                    if result.rowcount:
+                        self.logger.info(
+                            f"迁移：回填 {result.rowcount} 条历史发货单的 shipped_at")
         except Exception as e:
             self.logger.warning(f"服务模式列迁移失败（忽略）: {e}")
 

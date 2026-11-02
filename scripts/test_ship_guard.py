@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """发货链路「防呆」自测脚本（离线，不联网）
 
 逐条验证客户消息重复推送、订单状态异常、参数缺失、接口限流时，
@@ -35,6 +35,11 @@ except Exception:
     pass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 自测的临时数据库统一放到 temp/ 下，免得在项目根堆一堆 ship_guard_xxx 目录
+tempfile.tempdir = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "temp")
+os.makedirs(tempfile.tempdir, exist_ok=True)
 
 # 沙箱里 loguru 的 enqueue 需要命名管道，离线自测关掉异步写日志
 import loguru
@@ -100,10 +105,15 @@ def make_db():
     return db, tmpdir
 
 
-def add_order(db, order_sn, status=0, sn=SERIAL):
+def add_order(db, order_sn, status=0, sn=SERIAL, shipped=False):
+    """shipped=True 表示「已发货完成」：新语义用 status=4 + shipped_at（status=1 只代表核销成功）"""
+    from datetime import datetime as _dt
+
     with db.session_scope() as session:
         order = Order(shop_id=SHOP_ID, session_id=CUST_UID, sn_imei=sn, coupons="",
-                      order_sn=order_sn, status=status)
+                      order_sn=order_sn,
+                      status=4 if shipped else status,
+                      shipped_at=_dt.now() if shipped else None)
         session.add(order)
         session.flush()
         return order.id
@@ -214,7 +224,7 @@ async def main():
     check("G2 不调发货接口", h.ship_calls == [], h.ship_calls)
     check("G2 回「先发订单信息」", "订单" in (reply or ""), reply)
     h.reset()
-    shipped_id = add_order(db, ORDER_SN, status=1)
+    shipped_id = add_order(db, ORDER_SN, shipped=True)
     reply, status = await h.ship(order_sn="", order_id=shipped_id)
     check("G2 该单已发货时不再索要订单号", "已经发货完成" in (reply or ""), reply)
     check("G2 不主动发历史报告", h.reports == [], h.reports)
@@ -225,7 +235,7 @@ async def main():
     h.reset()
     with db.session_scope() as session:  # 清掉本单号的历史行，避免干扰
         session.query(Order).filter(Order.order_sn == ORDER_SN).update({"order_sn": None})
-    add_order(db, ORDER_SN, status=1)
+    add_order(db, ORDER_SN, shipped=True)
     h.detail = None  # 规格也查不到：没有任何可查的口径
     reply, status = await h.ship(order_sn=ORDER_SN)
     check("G3 不重复发货", h.ship_calls == [], h.ship_calls)
@@ -238,7 +248,7 @@ async def main():
     print("G4 本单已发货成功（order_id 判重）")
     h.reset()
     h.detail = None
-    done_id = add_order(db, "261028-000000000000777", status=1)
+    done_id = add_order(db, "261028-000000000000777", shipped=True)
     orig_already2 = h.h._order_already_shipped
     h.h._order_already_shipped = lambda *a, **k: False   # 单独验证 order_id 这道判重
     try:
@@ -315,7 +325,7 @@ async def main():
     h.reset()
     h.detail = {"pending_shipment": True, "goods_id": GOODS_ID,
                 "goods_name": "苹果gsx验机", "spec": SPEC_BOUGHT}
-    no_report_id = add_order(db, ORDER_SN, status=1)  # 上次规格没核对上，库里没有报告
+    no_report_id = add_order(db, ORDER_SN, shipped=True)  # 上次已发货但规格没核对上，库里没有报告
     reply, status = await h.ship(order_sn=ORDER_SN, order_id=no_report_id, spec="")
     check("G10 不重复发货", h.ship_calls == [], h.ship_calls)
     check("G10 不主动补查", h.gsx_calls == [], h.gsx_calls)
@@ -429,7 +439,7 @@ async def main():
     h.reset()
     with db.session_scope() as session:
         session.query(Order).delete()
-    rep_id = add_order(db, ORDER_SN, status=1)
+    rep_id = add_order(db, ORDER_SN, shipped=True)   # 已发货完成 = status 4 + shipped_at
     with db.session_scope() as session:
         session.query(Order).filter_by(id=rep_id).first().gsx_result = "报告内容"
     reply, _st = await h.ship(order_sn=ORDER_SN, order_id=rep_id, spec=SPEC_BOUGHT)

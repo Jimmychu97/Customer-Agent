@@ -202,8 +202,10 @@ class GoodsManagementWidget(QWidget):
         layout.addWidget(BodyLabel("SKU 规格（来自同步数据）"))
 
         self.sku_table = TableWidget()
-        self.sku_table.setColumnCount(7)
-        self.sku_table.setHorizontalHeaderLabels(["规格名称", "规格类别", "SKU ID", "规格ID", "ServerId", "真心ServerId", "设备类型"])
+        self.sku_table.setColumnCount(8)
+        self.sku_table.setHorizontalHeaderLabels(
+            ["规格名称", "规格类别", "SKU ID", "规格ID", "ServerId", "真心ServerId",
+             "设备类型", "服务模式"])
         self.sku_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         self.sku_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.sku_table.itemChanged.connect(self._on_sku_item_changed)
@@ -211,7 +213,7 @@ class GoodsManagementWidget(QWidget):
         header = self.sku_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setMinimumSectionSize(80)
-        for col in [1, 2, 3, 4, 5, 6]:
+        for col in [1, 2, 3, 4, 5, 6, 7]:
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self.sku_table.horizontalHeader().setStretchLastSection(False)
         layout.addWidget(self.sku_table)
@@ -436,6 +438,9 @@ class GoodsManagementWidget(QWidget):
                         if col < 4:
                             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                         self.sku_table.setItem(i, col, item)
+                    # 第 8 列：SKU 级服务模式（决定这单走卡券核销还是发货）
+                    self.sku_table.setCellWidget(
+                        i, 7, self._build_sku_service_mode_combo(row.id, row.service_mode))
                 self.sku_table.blockSignals(False)  # 填充完成后恢复信号
         except Exception as e:
             logger.error(f"加载SKU失败: {e}")
@@ -466,6 +471,41 @@ class GoodsManagementWidget(QWidget):
         )
         self._sync_thread.finished.connect(self._on_sync_done)
         self._sync_thread.start()
+
+    # SKU 级服务模式下拉：决定这单走卡券核销、发货，还是二选一
+    _SKU_MODE_ITEMS = ["跟随商品", "卡券核销", "仅发货", "二选一"]
+
+    def _build_sku_service_mode_combo(self, commit_id: int, service_mode) -> ComboBox:
+        combo = ComboBox()
+        combo.addItems(self._SKU_MODE_ITEMS)
+        index = {None: 0, 0: 1, 1: 2, 2: 3}.get(service_mode, 0)
+        combo.blockSignals(True)
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+        combo.currentIndexChanged.connect(
+            partial(self._on_sku_service_mode_changed, commit_id))
+        return combo
+
+    def _on_sku_service_mode_changed(self, commit_id: int, index: int):
+        """写库：0=跟随商品（NULL），1=卡券核销(0)，2=仅发货(1)，3=二选一(2)"""
+        mapping = {0: None, 1: 0, 2: 1, 3: 2}
+        if index not in mapping:
+            return
+        value = mapping[index]
+        try:
+            from database.db_manager import db_manager
+            from database.models import GoodsCommit
+
+            with db_manager.get_session() as session:
+                gc = session.query(GoodsCommit).filter_by(id=commit_id).first()
+                if gc:
+                    gc.service_mode = value
+                    session.commit()
+                    logger.info(
+                        f"SKU 服务模式已保存: goods_commit.id={commit_id} "
+                        f"service_mode={value}")
+        except Exception as e:
+            logger.error(f"保存 SKU 服务模式失败 id={commit_id}: {e}")
 
     def _on_sku_item_changed(self, item: QTableWidgetItem):
         """ServerId / 真心ServerId / 设备类型 列编辑后保存到数据库"""

@@ -11,6 +11,10 @@ from typing import Tuple
 PENDING_WINDOW_MINUTES = 120
 
 
+# 订单终态：1=核销成功，4=免卡券(发货)完成。终态行的凭据不再被后续消息改写
+FINAL_ORDER_STATUSES = (1, 4)
+
+
 class OrdersMixin:
     @staticmethod
     def _select_order(session, order_model, shop_id: str, from_uid: str,
@@ -41,6 +45,19 @@ class OrdersMixin:
             found = base.filter(order_model.coupons == coupon_no).order_by(order_model.id.desc()).first()
             if found is not None:
                 return found
+
+            # 本条只有卡券 -> 先看有没有"已经收到序列号、正在等卡券"的待核销单，有就并回去。
+            # 否则会给客户新建一张空序列号的单，永远凑不齐两项。线上真实表现：
+            # 客户先给序列号（已发货），再补卡券时系统反问"请提供序列号"，卡券永远核销不了。
+            if not sn:
+                for waiting in (
+                    base.filter(order_model.status != 1, order_model.created_at >= since)
+                    .order_by(order_model.id.desc())
+                    .limit(5)
+                    .all()
+                ):
+                    if waiting.sn_imei and not waiting.coupons:
+                        return waiting
 
         # 本条只有序列号 -> 先看有没有"已经收到卡券、正在等序列号"的待核销单，
         # 有就把序列号补进这一单（否则会被下面的序列号匹配抢走，新券永远核销不了）
@@ -143,7 +160,7 @@ class OrdersMixin:
                             if not order.sn_imei:
                                 order.sn_imei = sn
                             elif order.sn_imei != sn:
-                                if order.status == 1:
+                                if order.status in (1, 4):
                                     # 已核销成功 = 最终凭据（GSX 结果是按当时的序列号查的），不允许再改写
                                     self.logger.info(
                                         f"[核销] Order id={order.id} 已核销成功，保留原序列号 "
@@ -161,7 +178,7 @@ class OrdersMixin:
                             if not order.coupons:
                                 order.coupons = coupon_no
                             elif order.coupons != coupon_no:
-                                if order.status == 1:
+                                if order.status in (1, 4):
                                     # 已核销成功 = 最终凭据（券已被这张单核销掉），不允许再改写
                                     self.logger.info(
                                         f"[核销] Order id={order.id} 已核销成功，保留原卡券号 "
@@ -263,7 +280,7 @@ class OrdersMixin:
                 base = session.query(Order).filter(
                     Order.shop_id == shop_id,
                     Order.session_id == from_uid,
-                    Order.status != 1,
+                    Order.status.notin_((1, 4)),
                 )
                 order = None
                 if sn:
@@ -306,7 +323,7 @@ class OrdersMixin:
             with db_manager.session_scope() as session:
                 order = session.query(Order).filter(
                     Order.shop_id == shop_id, Order.session_id == from_uid,
-                    Order.status != 1, Order.created_at >= since, Order.coupons == "",
+                    Order.status.notin_((1, 4)), Order.created_at >= since, Order.coupons == "",
                 ).order_by(Order.id.desc()).first()
                 if order is None:
                     return None, None
@@ -410,7 +427,7 @@ class OrdersMixin:
                     .filter(
                         Order.shop_id == str(shop_id),
                         Order.session_id == str(from_uid),
-                        Order.status != 1,
+                        Order.status.notin_((1, 4)),
                         Order.order_sn.isnot(None),
                         Order.order_sn != "",
                     )
@@ -483,7 +500,7 @@ class OrdersMixin:
                        .filter(Order.shop_id == str(shop_id),
                                Order.session_id == str(from_uid),
                                Order.sn_imei == sn,
-                               Order.status != 1)
+                               Order.status.notin_((1, 4)))
                        .order_by(Order.id.desc())
                        .first())
                 if row is None:
@@ -526,6 +543,8 @@ class OrdersMixin:
     def _latest_shipped_order(self, shop_id: str, from_uid: str) -> Optional[Dict[str, Any]]:
         """该客户最近一张已发货、且留有验机服务口径（sku_id）或历史报告的单"""
         try:
+            from sqlalchemy import or_
+
             from database import db_manager
             from database.models import Order
 
@@ -533,7 +552,7 @@ class OrdersMixin:
                 order = session.query(Order).filter(
                     Order.shop_id == str(shop_id),
                     Order.session_id == str(from_uid),
-                    Order.status == 1,
+                    or_(Order.status == 4, Order.shipped_at.isnot(None)),
                 ).order_by(Order.id.desc()).first()
                 if not order:
                     return None
@@ -770,10 +789,16 @@ class OrdersMixin:
             self.logger.debug(f"[核销] 写回服务模式失败 order_id={order_id}: {e}")
 
     def _order_already_shipped(self, shop_id: str, order_sn: str) -> bool:
-        """该订单号在本店是否已发货成功（不依赖 order_id，防同一单重复调用发货接口）"""
+        """该订单号在本店是否已发货成功（不依赖 order_id，防同一单重复调用发货接口）
+
+        判据是「发货完成」（status=4 或 shipped_at 有值），**不能看 status==1**——
+        status=1 表示"卡券核销成功"，与发货无关。
+        """
         if not order_sn:
             return False
         try:
+            from sqlalchemy import or_
+
             from database import db_manager
             from database.models import Order
 
@@ -781,7 +806,7 @@ class OrdersMixin:
                 count = session.query(Order).filter(
                     Order.shop_id == str(shop_id),
                     Order.order_sn == str(order_sn),
-                    Order.status == 1,
+                    or_(Order.status == 4, Order.shipped_at.isnot(None)),
                 ).count()
                 return count > 0
         except Exception as e:
@@ -789,7 +814,10 @@ class OrdersMixin:
             return False
 
     def _shipped_by_id(self, order_id: Optional[int]) -> bool:
-        """该单是否已发货成功（只按主键判断，订单号缺失时用来防重复发货/重复索要）"""
+        """该单是否已发货成功（只按主键判断，订单号缺失时用来防重复发货/重复索要）
+
+        与 `_already_verified` 分开判：核销成功(status=1) 不等于已发货。
+        """
         if not order_id:
             return False
         try:
@@ -797,7 +825,7 @@ class OrdersMixin:
             from database.models import Order
             with db_manager.session_scope() as session:
                 order = session.query(Order).filter(Order.id == order_id).first()
-                return bool(order and order.status == 1)
+                return bool(order and (order.status == 4 or order.shipped_at))
         except Exception as e:
             self.logger.debug(f"[发货] 查询订单状态失败 order_id={order_id}: {e}")
             return False
@@ -811,7 +839,10 @@ class OrdersMixin:
             from database.models import Order
             with db_manager.session_scope() as session:
                 order = session.query(Order).filter(Order.id == order_id).first()
-                return bool(order and order.status == 1 and order.order_sn == order_sn)
+                if not order:
+                    return False
+                shipped = order.status == 4 or bool(order.shipped_at)
+                return bool(shipped and order.order_sn == order_sn)
         except Exception as e:
             self.logger.debug(f"[发货] 查询已发货状态失败 order_id={order_id}: {e}")
             return False
@@ -819,28 +850,40 @@ class OrdersMixin:
     def _update_order_status(self, order_id: int, status: int, order_sn: Optional[str] = None) -> None:
         """更新 Order 状态
 
-        已核销成功（status=1）的单不会被后续失败结果回退成失败：
-        客户把同一张已核销成功的券再发一次时，接口会返回"已核销"错误，
-        此时应保留成功状态，只把错误反馈给客户。
+        状态语义（核销与发货必须分开，否则两者会互相误判成"已完成"）：
+            0 待核销 / 1 核销成功 / 2 核销失败 / 3 已过期 / 4 免卡券(发货)完成
 
-        order_sn 仅发货流程传入：成功时顺带把订单号与本单实际执行的服务模式写库。
+        - 只有核销成功才写 1；
+        - 发货成功（带 order_sn）写 4，并记 shipped_at，不动 status=1 的核销语义；
+        - 终态（1 核销成功 / 4 发货完成）不会被后续失败回退：
+          客户把同一张已核销成功的券再发一次时，接口会返回"已核销"错误，
+          此时应保留成功状态，只把错误反馈给客户。
         """
         if not order_id:
             return
         try:
+            from datetime import datetime as dt
+
             from database import db_manager
             from database.models import Order
+
+            final_status = {1, 4}
             with db_manager.session_scope() as session:
                 order = session.query(Order).filter_by(id=order_id).first()
                 if order:
-                    if order.status == 1 and status == 2:
+                    if order.status in final_status and status not in final_status:
                         self.logger.info(
-                            f"[核销] Order id={order_id} 已是核销成功状态，忽略失败状态回写"
-                        )
+                            f"[发货] Order id={order_id} 已是终态(status={order.status})，"
+                            f"忽略回写 status={status}")
+                        return
+                    if order_sn:
+                        # 发货成功：单独记 shipped_at，status 用 4 表示"免卡券完成"
+                        order.status = 4
+                        order.order_sn = order_sn
+                        order.shipped_at = dt.now()
+                        self.logger.info(
+                            f"[发货] Order id={order_id} 标记发货完成 order_sn={order_sn}")
                         return
                     order.status = status
-                    if order_sn and status == 1:
-                        order.order_sn = order_sn
-                        order.service_mode = _SERVICE_MODE_SHIP
         except Exception as e:
             self.logger.opt(exception=True).error(f"[核销] 更新 Order 状态失败 order_id={order_id}: {e}")

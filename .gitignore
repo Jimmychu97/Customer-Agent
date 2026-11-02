@@ -68,3 +68,12 @@ temp/
 data-gym-cache/
 jieba.cache
 .amazonq/
+
+# 自测脚本的临时库目录（脚本已改为写入 temp/，这里再兜一层）
+ship_guard_*/
+spec_query_*/
+e2e_mode_*/
+voucher_dedup_*/
+msg_records_*/
+svc_mode_*/
+dual_mode_*/

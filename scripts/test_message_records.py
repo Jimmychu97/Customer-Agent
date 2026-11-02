@@ -33,6 +33,11 @@ except Exception:
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+# 自测的临时数据库统一放到 temp/ 下，免得在项目根堆一堆 ship_guard_xxx 目录
+tempfile.tempdir = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "temp")
+os.makedirs(tempfile.tempdir, exist_ok=True)
+
 
 def _install_stubs():
     """本地/打包环境常缺 websockets、openai、jieba；用桩模块/桩包绕过，保证自测可离线运行"""

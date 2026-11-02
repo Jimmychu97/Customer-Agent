@@ -29,6 +29,11 @@ except Exception:
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 自测的临时数据库统一放到 temp/ 下，免得在项目根堆一堆 ship_guard_xxx 目录
+tempfile.tempdir = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "temp")
+os.makedirs(tempfile.tempdir, exist_ok=True)
+
 # 沙箱/CI 里 loguru 的 enqueue 需要命名管道，离线自测直接关掉异步写日志
 import loguru
 
