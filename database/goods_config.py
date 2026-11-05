@@ -38,20 +38,22 @@ _EMPTY_CONFIG: Dict[str, Optional[Any]] = {
 
 
 def get_verify_config(goods_id: Any, spec_name: Optional[str] = None) -> Dict[str, Any]:
-    """读取某个 goods_id (+ 规格) 的验机配置与服务模式
+    """读取某个 goods_id (+ 可选规格) 的验机配置与服务模式
 
-    **严格匹配**：必须命中具体规格，绝不拿别的规格顶替——
-    验机编码决定报告字段，客户买的是哪个规格就只能查哪个（换规格等于报告对不上钱）。
-    因此 `spec_name` 为空时直接返回空配置（宁可"先不查、核对后再补"，也不猜）。
+    有规格时按「商品 + 规格」精确匹配；规格为空时按商品 ID 查找服务器配置。
+    商品下多个 SKU 只有在查询编码完全一致时才允许商品级兜底，编码不一致时返回空配置，
+    防止把多规格商品误查成另一种套餐。
 
     Args:
         goods_id: 商品ID（可 str/int）
-        spec_name: 规格名称（与 goods_commit.spec_name 对应）
+        spec_name: 规格名称（与 goods_commit.spec_name 对应，可为空）
 
     Returns:
         {"server_id", "zhenxin_server_id", "device_type", "service_mode", "no_coupon_needed"}
     """
-    if goods_id in (None, "", 0, "0") or not spec_name:
+    goods_key = str(goods_id or "").strip()
+    spec_key = str(spec_name or "").strip()
+    if not goods_key or goods_key == "0":
         return dict(_EMPTY_CONFIG)
 
     try:
@@ -59,10 +61,31 @@ def get_verify_config(goods_id: Any, spec_name: Optional[str] = None) -> Dict[st
         from database.models import GoodsCommit
 
         with db_manager.session_scope() as session:
-            gc = session.query(GoodsCommit).filter(
-                GoodsCommit.goods_id == str(goods_id),
-                GoodsCommit.spec_name == spec_name,
-            ).first()
+            query = session.query(GoodsCommit).filter(
+                GoodsCommit.goods_id == goods_key,
+            )
+            if spec_key:
+                gc = query.filter(GoodsCommit.spec_name == spec_key).first()
+            else:
+                rows = query.filter(
+                    (GoodsCommit.server_id.isnot(None))
+                    | (GoodsCommit.zhenxin_server_id.isnot(None))
+                ).all()
+                signatures = {
+                    (row.server_id, row.zhenxin_server_id, row.device_type,
+                     row.service_mode, bool(row.no_coupon_needed))
+                    for row in rows
+                }
+                if len(signatures) != 1:
+                    logger.warning(
+                        f"[验机配置] 商品级兜底失败，查询编码不唯一 "
+                        f"goods_id={goods_key} rows={len(rows)}")
+                    return dict(_EMPTY_CONFIG)
+                gc = rows[0] if rows else None
+                if gc:
+                    logger.info(
+                        f"[验机配置] 规格为空，按商品ID兜底 goods_id={goods_key} "
+                        f"zhenxin={gc.zhenxin_server_id} server_id={gc.server_id}")
             if not gc:
                 return dict(_EMPTY_CONFIG)
             mode = gc.service_mode

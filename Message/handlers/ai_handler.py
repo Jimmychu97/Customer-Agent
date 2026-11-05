@@ -266,6 +266,9 @@ class AIReplyHandler(BaseHandler):
                     Order.shop_id == shop_id,
                     Order.session_id == from_uid,
                     Order.status.notin_((1, 4)),
+                    # 已经写入 GSX 报告的查询服务已经完成，不再给后续普通问题
+                    # 追加「待发货/还缺订单」尾巴。
+                    Order.gsx_result.is_(None),
                     Order.created_at >= since,
                 ).order_by(Order.id.desc()).first()
                 if not order:
@@ -284,8 +287,8 @@ class AIReplyHandler(BaseHandler):
                         )
                     if not order.order_sn:
                         return (
-                            "🔔 待发货，还缺拼多多订单号！\n"
-                            "【待收货 → 点击商品 → 复制订单号】发给我即可完成发货。"
+                            "🔔 待发货，还缺拼多多订单！\n"
+                            "点聊天框右下角「+」→ 选「订单」→ 把这笔单的订单卡片发我，即可完成发货。"
                         )
                     return ""
 
@@ -293,8 +296,8 @@ class AIReplyHandler(BaseHandler):
                 if order.service_mode != SERVICE_MODE_VOUCHER:
                     if has_sn and not has_coupon:
                         return (
-                            "🔔 还缺拼多多订单号！\n"
-                            "【待收货 → 我的订单 → 选该商品 → 复制订单号】发我即可完成发货与查询。"
+                            "🔔 还缺拼多多订单！\n"
+                            "点聊天框右下角「+」→ 选「订单」→ 把这笔单的订单卡片发我，即可完成发货与查询。"
                         )
                     if has_coupon and not has_sn:
                         return (

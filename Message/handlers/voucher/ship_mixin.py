@@ -45,6 +45,12 @@ class ShipMixin:
         api = MmsOrderAPI(str(shop_id), str(user_id))
         return api.ship_without_logistics(order_sn)
 
+    @staticmethod
+    def _is_already_shipped_status(detail: Dict[str, Any]) -> bool:
+        """平台已发货、待收货状态表示该订单服务已使用，不能再次发货。"""
+        status = str((detail or {}).get("order_status_str") or "")
+        return "待收货" in status or "已发货" in status
+
     async def _do_ship(self, sn: str, order_sn: str, shop_id: str, user_id: str, from_uid: str,
                        order_id: Optional[int], goods_id=None, spec: str = "",
                        goods_name: str = "") -> Tuple[Optional[str], str]:
@@ -78,6 +84,19 @@ class ShipMixin:
         验机报告链（voucher_success_text 传发货成功文案）。
         """
         if not sn:
+            # 客户只发了订单号：先看他之前用过的序列号（存在 orders 表里），有就让他确认，
+            # 不再干巴巴地要一遍——线上「明明发了序列号又要序列号」多数是这条路径
+            known = self._known_serial(shop_id, from_uid, order_sn) if order_sn else ""
+            if known:
+                self._attach_serial(order_id, known)
+                self.logger.info(
+                    f"[发货] 缺序列号，改用客户历史序列号 {known!r} 请他确认 "
+                    f"order_sn={order_sn!r} order_id={order_id}")
+                # 只确认序列号一次；订单身份已在本次流程中确定，确认后直接查询并发货。
+                await self._ask_serial_confirm(
+                    known, goods_id, spec or "", order_id, order_sn,
+                    shop_id, user_id, from_uid)
+                return None, _SHIP_SUCCESS
             self.logger.warning(
                 f"[发货] 缺少序列号 sn={sn!r} order_sn={order_sn!r} order_id={order_id}，跳过发货调用"
             )
@@ -112,33 +131,39 @@ class ShipMixin:
                 order_sn, goods_id, spec or "")
             return reply, _SHIP_SUCCESS
 
-        # 状态防呆：发货前核对平台订单是不是「待发货」，不是就绝不调发货接口。
-        # 顺带从订单里补全 goods_id/spec（客户只发订单号时也能查到正确的验机套餐）。
-        # 规格只有订单详情能给出，所以命中限流时先重试几次再放弃（放到线程里，别卡事件循环）。
-        # 查不到（接口失败/风控/订单不在最近 30 天）只当「无法核对」，记警告后按原逻辑继续，
-        # 否则风控期间整个发货功能会瘫掉；平台侧本身也会拒绝非待发货的单。
+        # 查不到（接口失败/风控/订单不在最近 30 天）就拒绝发货，发货不可逆，不能把
+        # 「平台稍后会拒绝」当作业务保护。待收货/已发货同样绝不进入发货接口。
         from core.order_lookup import get_order_detail
 
         detail = await asyncio.to_thread(get_order_detail, shop_id, user_id, order_sn, retries=2)
-        if detail is not None:
-            if not goods_id:
-                goods_id = detail.get("goods_id")
-            if not spec:
-                spec = str(detail.get("spec") or "")
-            goods_name = goods_name or str(detail.get("goods_name") or "")
-            if not detail.get("pending_shipment"):
-                state = (detail.get("order_status_str")
-                         or f"shipping_status={detail.get('shipping_status')} "
-                            f"pay_status={detail.get('pay_status')}")
-                self.logger.warning(
-                    f"[发货] 订单不是待发货状态，拒绝发货 order_sn={order_sn} 状态={state}")
-                return (
-                    f"❌ 该订单当前不是「待发货」状态，无需发货\n"
-                    f"订单号：{order_sn}\n当前状态：{state}"
-                ), _SHIP_FAILED
-        else:
+        if detail is None:
             self.logger.warning(
-                f"[发货] 无法核对订单状态（平台未返回），按原逻辑继续 order_sn={order_sn}")
+                f"[发货] 无法核对订单状态，拒绝发货 order_sn={order_sn}")
+            return (
+                f"⚠️ 订单 {order_sn} 暂时无法核对状态，本次未发货。\n"
+                "请稍后再试或重新发送订单卡片，我核对到「待发货」后才会处理。"
+            ), _SHIP_ERROR
+        if not goods_id:
+            goods_id = detail.get("goods_id")
+        if not spec:
+            spec = str(detail.get("spec") or "")
+        goods_name = goods_name or str(detail.get("goods_name") or "")
+        if not detail.get("pending_shipment"):
+            state = (detail.get("order_status_str")
+                     or f"shipping_status={detail.get('shipping_status')} "
+                        f"pay_status={detail.get('pay_status')}")
+            self.logger.warning(
+                f"[发货] 订单不是待发货状态，拒绝发货 order_sn={order_sn} 状态={state}")
+            if self._is_already_shipped_status(detail):
+                return (
+                    f"✅ 该订单已发货完成，服务已使用。\n"
+                    f"订单号：{order_sn}\n当前状态：{state}\n\n"
+                    "如需继续查询，请重新下单。"
+                ), _SHIP_SUCCESS
+            return (
+                f"❌ 该订单当前不是「待发货」状态，本次未发货。\n"
+                f"订单号：{order_sn}\n当前状态：{state}"
+            ), _SHIP_FAILED
 
         # 验机前置：序列号在验机库查不到就绝不发货。
         # 发货不可回滚，而报告是发货后必须给的——查不到就没有补救余地，只能先拦住。
@@ -152,6 +177,7 @@ class ShipMixin:
             f"specs={spec_count}"
         )
         report_query_enabled = bool(server_id or zhenxin_sid)
+        query_key = self._query_type_key(goods_id, spec, query_cfg)
 
         # 验机商品、但这次连规格都没拿到（客户只发了订单号/订单详情被风控）：发货前就拦住。
         # 先发货再要规格的后果是报告永远出不来——线上 17:28 就是这么丢的报告。
@@ -162,8 +188,8 @@ class ShipMixin:
                 f"goods_id={goods_id} spec={spec!r} specs={spec_count} order_id={order_id}")
             return self._ship_spec_needed_text(order_sn, spec_count), _SHIP_ERROR
 
-        report_deduped = self._report_recently_sent(shop_id, from_uid, sn)
-        serial_needs_confirm = self._serial_needs_confirm(shop_id, from_uid, sn)
+        report_deduped = self._report_recently_sent(shop_id, from_uid, sn, query_key)
+        serial_needs_confirm = self._serial_needs_confirm(shop_id, from_uid, sn, query_key)
 
         def _reject_text(err) -> str:
             return (
@@ -181,6 +207,7 @@ class ShipMixin:
 
         report_data = None
         if report_query_enabled and not report_deduped and not serial_needs_confirm:
+            await self._notify_query_pending(shop_id, user_id, from_uid, sn, order_sn)
             try:
                 if device_type == "apple" and zhenxin_sid:
                     from Channel.pinduoduo.utils.API.gsxunlocking_api import query_gsxunlocking
@@ -244,14 +271,15 @@ class ShipMixin:
             return (
                 success_text + "\n\n"
                 + note
-                + "\n这单的查询规格还没核对上，麻烦把【订单卡片】或【订单号】再发我一次"
+                + "\n这单的查询规格还没核对上，麻烦把【订单卡片】再发我一次"
                   "（点击聊天框右下角「+」→ 选择「订单」→ 发送订单卡片），我按订单核对后马上补报告～"
             ), _SHIP_SUCCESS
 
         # 刚发过这份报告就别再查一遍（重复推消息不重复烧接口、不重复刷屏）
         if report_deduped:
             self.logger.info(
-                f"[发货] 报告刚发过，跳过重复查询 sn={sn} order_sn={order_sn}")
+                f"[发货] 报告刚发过，跳过重复查询 sn={sn} order_sn={order_sn} "
+                f"query_key={query_key!r}")
             return success_text + "\n\n" + _REPORT_ALREADY_SENT_TEXT, _SHIP_SUCCESS
 
         # 货已发、序列号/IMEI 还没经客户确认：先让客户核对，确认后再查（避免 OCR 认错就查）
@@ -382,11 +410,15 @@ class ShipMixin:
         if resolved_spec and not spec:
             spec = resolved_spec
 
-        if self._ship_needs_confirm(shop_id, from_uid, sn, order_sn):
-            await self._ask_ship_confirm(sn, order_sn, order_id, goods_id, spec, goods_name,
-                                         shop_id, user_id, from_uid, newest=newest,
-                                         assumed=assumed)
+        # 序列号只确认一次：订单到达后直接按订单套餐查询并继续发货，
+        # 不再追加第二张「序列号+订单」确认卡片。
+        query_key = self._query_type_key(goods_id, spec or "", cfg)
+        if self._serial_needs_confirm(shop_id, from_uid, sn, query_key):
+            await self._ask_serial_confirm(
+                sn, goods_id, spec, order_id, order_sn,
+                shop_id, user_id, from_uid)
             return None, _SHIP_SUCCESS
+        self._mark_serial_confirmed(shop_id, from_uid, sn, query_key)
         return await self._do_ship(sn, order_sn, shop_id, user_id, from_uid, order_id,
                                    goods_id=goods_id, spec=spec, goods_name=goods_name)
 
@@ -412,15 +444,32 @@ class ShipMixin:
                                   order_sn: str, shop_id: str, user_id: str, from_uid: str,
                                   prefix: str = "") -> None:
         """记下「待确认」并让客户核对序列号；确认后才去查验机"""
+        # 查询项目身份要落到确认记录里，避免激活锁确认结果错误复用于全面验机。
+        query_key = self._query_type_key(goods_id, spec)
         self._set_confirm_pending(
             shop_id, from_uid, kind="query", sn=sn, goods_id=goods_id, spec=spec or "",
-            order_id=order_id, order_sn=order_sn or "")
+            query_key=query_key, order_id=order_id, order_sn=order_sn or "")
         text = self._serial_confirm_text(sn, prefix)
         await self._send(shop_id, user_id, from_uid, text)
         self._record_message(f"pinduoduo{from_uid}", "assistant", text)
         self.logger.info(
             f"[核销] 序列号待客户确认后才查 sn={sn} order_sn={order_sn!r} "
             f"order_id={order_id} from_uid={from_uid}")
+
+    async def _ask_serial_only_confirm(self, sn: str, order_id: Optional[int],
+                                       shop_id: str, user_id: str, from_uid: str) -> None:
+        """仅收到序列号时先让客户确认；未拿到订单前不猜查询项目、不查询。"""
+        self._set_confirm_pending(
+            shop_id, from_uid, kind="serial", sn=sn, order_id=order_id,
+            order_sn="", goods_id=None, spec="")
+        text = (
+            f"✅ 已记录序列号/IMEI：{sn}\n"
+            "请确认这个序列号/IMEI 是否正确。确认无误请回复「确认」，"
+            "然后发送订单卡片；我会按订单对应的查询项目为您查询。"
+        )
+        await self._send(shop_id, user_id, from_uid, text)
+        self._record_message(f"pinduoduo{from_uid}", "assistant", text)
+        self.logger.info(f"[订单] 已收到序列号，等待客户确认后再收订单 sn={sn}")
 
     async def _resume_confirmed_serial(self, info: Dict[str, Any], shop_id: str,
                                        user_id: str, from_uid: str) -> bool:
@@ -430,10 +479,22 @@ class ShipMixin:
         spec = str(info.get("spec") or "")
         order_id = info.get("order_id")
         session_id = f"pinduoduo{from_uid}"
-        self._mark_serial_confirmed(shop_id, from_uid, sn)
+        query_key = self._query_type_key(goods_id, spec)
+        self._mark_serial_confirmed(shop_id, from_uid, sn, query_key)
         self.logger.info(
             f"[核销] 客户已确认序列号，开始查验机 sn={sn} order_sn={order_sn!r} "
             f"order_id={order_id} spec={spec!r}")
+        if info.get("kind") == "serial":
+            # 只确认了设备标识，尚无订单就不能判定激活锁/全面验机套餐，更不能发货。
+            self._mark_serial_confirmed(shop_id, from_uid, sn)
+            reply = (
+                f"✅ 已确认序列号/IMEI：{sn}\n"
+                "请发送这笔订单的【订单卡片】（聊天框右下角「+」→ 订单 → 发送订单卡片），"
+                "我会按订单对应的查询项目马上为您查询。"
+            )
+            await self._send(shop_id, user_id, from_uid, reply)
+            self._record_message(session_id, "assistant", reply)
+            return True
         if info.get("kind") == "ship":
             self._mark_ship_confirmed(shop_id, from_uid, sn, order_sn)
             self.logger.info(
@@ -446,20 +507,24 @@ class ShipMixin:
                 self._record_message(session_id, "assistant", reply)
             return True
         if order_sn:
-            # 客户已确认序列号 = 明确要看报告，直接按订单口径查/发，不再走「不主动发历史报告」
-            found = self._order_by_sn(shop_id, order_sn) or {"order_sn": order_sn}
+            # 已确认序列号后按本订单查询，随后直接进入发货前状态校验，不再弹第二次确认卡片。
+            found = self._order_by_sn(shop_id, order_sn) or {"order_sn": order_sn,
+                                                              "order_id": order_id}
             handled = await self._resend_or_query_report(
                 sn, found, shop_id, user_id, from_uid, order_sn, goods_id, spec)
-            if not handled:
-                reply = (f"✅ 已确认序列号/IMEI：{sn}\n"
-                         "这单的验机服务口径没核对上，麻烦把【订单卡片】或【订单号】发我，"
-                         "我按订单帮您查～")
+            if handled:
+                reply, _status = await self._do_ship(
+                    sn, order_sn, shop_id, user_id, from_uid, order_id,
+                    goods_id=goods_id, spec=spec)
             else:
-                reply = None
+                reply = (f"✅ 已确认序列号/IMEI：{sn}\n"
+                         "这单的验机服务口径没核对上，麻烦把【订单卡片】发我"
+                         "（点击聊天框右下角「+」→ 选择「订单」→ 发送订单卡片），"
+                         "我按订单帮您查～")
         else:
             reply, _status = await self._query_report_only(
                 sn, goods_id, spec, shop_id, user_id, from_uid, order_id)
-            if reply is None and not self._report_recently_sent(shop_id, from_uid, sn):
+            if reply is None and not self._report_recently_sent(shop_id, from_uid, sn, query_key):
                 # 「确认」之后的续接不允许一句话都没有：客户已经确认了，
                 # 这里静默就等于让他干等（线上 16:28 客户连问三次没人回）。
                 self.logger.error(
@@ -535,7 +600,8 @@ class ShipMixin:
             return True
         await self._send(
             shop_id, user_id, from_uid,
-            "这单的验机服务口径没找到，麻烦把【订单卡片】或【订单号】发我，我按订单帮您查～")
+            "这单的验机服务口径没找到，麻烦把【订单卡片】发我"
+            "（点击聊天框右下角「+」→ 选择「订单」→ 发送订单卡片），我按订单帮您查～")
         return True
 
     def _can_query_report(self, goods_id=None, spec: str = "",
@@ -610,8 +676,9 @@ class ShipMixin:
         order_id = found.get("order_id")
         tail = f"✅ 已核对到订单：{order_sn or found.get('order_sn') or ''}\n这是您本单的验机报告～"
 
-        # 防重复发送：客户/平台把同一条序列号重复推过来时，别把整份报告+分析+好评再发一遍
-        if self._report_recently_sent(shop_id, from_uid, sn):
+        query_key = str(found.get("query_key") or self._query_type_key(goods_id, spec))
+        # 同一查询项目内才去重；激活锁和全面验机不能共用序列号去重记录。
+        if self._report_recently_sent(shop_id, from_uid, sn, query_key):
             self.logger.info(
                 f"[发货] 报告刚发过，忽略重复请求 sn={sn} order_sn={order_sn}")
             await self._send(shop_id, user_id, from_uid, _REPORT_ALREADY_SENT_TEXT)
@@ -639,13 +706,14 @@ class ShipMixin:
             return True
 
         # 序列号/IMEI 必须客户确认后才查验机
-        if self._serial_needs_confirm(shop_id, from_uid, sn):
+        if self._serial_needs_confirm(shop_id, from_uid, sn, query_key):
             await self._ask_serial_confirm(
                 sn, goods_id, spec or "", found.get("order_id"), order_sn,
                 shop_id, user_id, from_uid)
             return True
 
         if zhenxin_sid:
+            await self._notify_query_pending(shop_id, user_id, from_uid, sn, order_sn)
             from Channel.pinduoduo.utils.API.gsxunlocking_api import query_gsxunlocking
             self.logger.info(
                 f"[发货] 用历史订单的验机服务重新查询 sn={sn} zhenxin={zhenxin_sid} order_sn={order_sn}"
@@ -654,6 +722,7 @@ class ShipMixin:
             data = result.get("result")
             sender = self._query_gsxunlocking_and_send
         else:
+            await self._notify_query_pending(shop_id, user_id, from_uid, sn, order_sn)
             from Channel.pinduoduo.utils.API.gsx_api import query_gsx
             self.logger.info(
                 f"[发货] 用历史订单的验机服务重新查询 sn={sn} server_id={server_id} order_sn={order_sn}"
@@ -669,6 +738,144 @@ class ShipMixin:
             return True
         await sender(sn, "", "", data, order_id, shop_id, user_id, from_uid, tail,
                      on_empty_note=_REPORT_EMPTY_TEXT)
+        self._mark_report_sent(shop_id, from_uid, sn, query_key)
+        return True
+
+    async def _handle_serial_then_ship(
+        self, sn: str, order_sn, goods_id, spec: str, goods_name: str,
+        shop_id: str, user_id: str, from_uid: str, session_id: str,
+        msg_id: str = "",
+    ) -> bool:
+        """订单与序列号齐全后先按订单套餐查询；待发货状态仅在真正发货前校验。"""
+        from .handler import _mark_handled, _recently_handled
+
+        dup_key = f"serial:{shop_id}:{from_uid}:{msg_id}:{sn}:{order_sn or ''}"
+        if _recently_handled(dup_key, ttl=120):
+            self.logger.info(
+                f"[发货] 同一条序列号/订单在 120s 内已处理过，静默跳过 sn={sn} order_sn={order_sn!r}")
+            return True
+        _mark_handled(dup_key)
+        self._record_message(session_id, "user", f"序列号 {sn}")
+
+        # 序列号先到时只保存并让客户确认。订单尚未到达时，不能猜测查询套餐。
+        if not order_sn:
+            order_id = self._save_standalone_serial(sn, shop_id, from_uid)
+            if self._serial_needs_confirm(shop_id, from_uid, sn):
+                await self._ask_serial_only_confirm(sn, order_id, shop_id, user_id, from_uid)
+            else:
+                text = (
+                    f"✅ 已确认序列号/IMEI：{sn}\n"
+                    "请发送订单卡片，我会按订单对应的查询项目为您查询。"
+                )
+                await self._send(shop_id, user_id, from_uid, text)
+                self._record_message(session_id, "assistant", text)
+            return True
+
+        detail = None
+        stored_order_id = None
+        if order_sn:
+            # 订单先落库。即使订单接口暂时 40002，也保留已收到的订单号和序列号，
+            # 后续无需再向客户索要序列号。
+            _stored_sn, _coupon, stored_order_id, updates = await self._upsert_order(
+                sn, None, shop_id, from_uid, order_sn=str(order_sn),
+                service_mode=_SERVICE_MODE_SHIP)
+            await self._send_updates(updates, shop_id, user_id, from_uid, session_id)
+            sn = _stored_sn or sn
+            try:
+                from core.order_lookup import get_order_detail
+                detail = await asyncio.to_thread(
+                    get_order_detail, shop_id, user_id, str(order_sn), retries=1)
+            except Exception as e:
+                self.logger.warning(f"[订单查询] 读取订单详情失败 order_sn={order_sn}: {e}")
+            if detail:
+                # 有平台详情时它优先于会话商品，防止上一件商品的套餐串到本订单。
+                goods_id = detail.get("goods_id") or goods_id
+                spec = str(detail.get("spec") or spec or "")
+                goods_name = str(detail.get("goods_name") or goods_name or "")
+            elif not (goods_id and spec):
+                text = (
+                    f"✅ 已记录订单号：{order_sn}\n"
+                    f"✅ 已记录序列号/IMEI：{sn}\n"
+                    "订单的查询项目暂时核对不到，本次先不查询；请重新发送订单卡片，"
+                    "无需重复发送序列号。"
+                )
+                await self._send(shop_id, user_id, from_uid, text)
+                self._record_message(session_id, "assistant", text)
+                return True
+        elif not goods_id:
+            try:
+                from core.service_mode import infer_goods_id_from_session
+                goods_id = infer_goods_id_from_session(shop_id, from_uid)
+            except Exception as e:
+                self.logger.debug(f"[发货] 会话商品推断失败: {e}")
+
+        if not spec and goods_id:
+            try:
+                from Message.core.conversation_product import _backfill_single_spec
+                spec = _backfill_single_spec(str(goods_id)) or ""
+            except Exception as e:
+                self.logger.debug(f"[发货] 补全唯一规格失败 goods_id={goods_id}: {e}")
+
+        query_cfg = self._resolve_query_config(goods_id, spec)
+        query_key = self._query_type_key(goods_id, spec, query_cfg)
+        if not (query_cfg.get("server_id") or query_cfg.get("zhenxin_server_id")):
+            text = (
+                f"⚠️ 已收到序列号/IMEI：{sn}\n"
+                + (f"订单号：{order_sn}\n" if order_sn else "")
+                + "当前没有核对到这笔订单对应的查询项目，本次未查询、未发货。"
+                "请重新发送订单卡片或联系人工核对。"
+            )
+            await self._send(shop_id, user_id, from_uid, text)
+            self._record_message(session_id, "assistant", text)
+            return True
+
+        # 订单行已在收到订单时创建；拿到套餐后仅补项目身份，绝不因同一序列号覆盖别的套餐。
+        if stored_order_id is not None:
+            self._set_order_query_key(stored_order_id, query_key)
+            order_id = stored_order_id
+        else:
+            final_sn, _coupon, order_id, updates = await self._upsert_order(
+                sn, None, shop_id, from_uid, service_mode=_SERVICE_MODE_SHIP,
+                query_key=query_key)
+            await self._send_updates(updates, shop_id, user_id, from_uid, session_id)
+            sn = final_sn or sn
+
+        # 先确认序列号，才允许根据订单查询。序列号之前已单独确认过时，默认确认记录
+        # 会放行这里；若客户直接把序列号和订单一起发来，则在此询问一次后再查询。
+        if self._serial_needs_confirm(shop_id, from_uid, sn):
+            await self._ask_serial_confirm(
+                sn, goods_id, spec, order_id, str(order_sn), shop_id, user_id, from_uid)
+            return True
+        self._mark_serial_confirmed(shop_id, from_uid, sn, query_key)
+        reply, query_status = await self._query_report_only(
+            sn, goods_id, spec, shop_id, user_id, from_uid, order_id)
+        # 报告发送器会写去重记录；这里再写一次保证替换后的发送器也不会让后续发货重复查询。
+        if query_status == _SHIP_SUCCESS:
+            self._mark_report_sent(shop_id, from_uid, sn, query_key)
+        if reply:
+            await self._send(shop_id, user_id, from_uid, reply)
+            self._record_message(session_id, "assistant", reply)
+
+        if not order_sn:
+            guide = (
+                "📦 如需发货，请发送这笔订单的【订单卡片】"
+                "（聊天框右下角「+」→ 订单 → 发送订单卡片）。"
+            )
+            await self._send(shop_id, user_id, from_uid, guide)
+            self._record_message(session_id, "assistant", guide)
+            return True
+
+        # 用户已确认序列号后，订单到达即查询并自动发货；_do_ship_locked 会在发货前
+        # 实时校验订单是否仍为待发货，避免第二次向客户发送确认卡片。
+        self.logger.info(
+            f"[发货] 按订单实际查询项目处理并自动发货 order_sn={order_sn} goods_id={goods_id} "
+            f"spec={spec!r} query_key={query_key!r} sn={sn}")
+        reply, _status = await self._do_ship(
+            sn, str(order_sn), shop_id, user_id, from_uid, order_id,
+            goods_id=goods_id, spec=spec, goods_name=goods_name)
+        if reply:
+            await self._send(shop_id, user_id, from_uid, reply)
+            self._record_message(session_id, "assistant", reply)
         return True
 
     async def _handle_ship_branch(
@@ -714,7 +921,7 @@ class ShipMixin:
                 text = (
                     f"✅ 已收到序列号/IMEI：{final_sn}\n"
                     f"您名下有 {len(orders)} 笔待发货订单：\n{lines}{more}\n\n"
-                    f"麻烦回复要查的那一笔【订单号】（或把那一笔的订单卡片转发给我），"
+                    f"麻烦把要查的那一笔的【订单卡片】发我（点击聊天框右下角「+」→ 选择「订单」→ 发送订单卡片），"
                     f"我按订单发货并出报告～"
                 )
                 await self._send(shop_id, user_id, from_uid, text)
@@ -821,7 +1028,7 @@ class ShipMixin:
                 reply = (
                     f"✅ 已收到序列号/IMEI：{final_sn}\n"
                     f"请顺便核对一下这个序列号/IMEI 是否正确（不对就把正确的发我）\n\n"
-                    f"还没核对到您的订单，麻烦把【订单卡片】或【订单号】发我"
+                    f"还没核对到您的订单，麻烦把【订单卡片】发我"
                     f"（点击聊天框右下角「+」→ 选择「订单」→ 发送订单卡片），"
                     f"我按订单核对查询项目后，再请您确认一次就发货并出报告～"
                 )
